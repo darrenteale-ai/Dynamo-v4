@@ -8,17 +8,27 @@ This replaces the previous day/night entries-based rota model in this repo
 with a shift-block model (ref/period/type/vehicle/area/2-crew), per the
 current spec.
 
-## Stack
+## Structure (deliberately flat, for easy pushing)
 
-- `backend/` — Node.js + Express + Prisma + PostgreSQL, JWT auth. Also builds
-  and serves the frontend's static files, so only **one Railway service** is
-  needed.
-- `backend/frontend/` — React + Vite. It lives *inside* `backend/` (not next
-  to it) on purpose: the Railway service is configured with
-  `rootDirectory: backend`, which means the build only has access to files
-  inside that folder — a sibling `../frontend` is invisible to it. Nesting it
-  here is what lets `backend`'s build script reach it without any Railway
-  config changes.
+```
+backend/
+├── package.json
+├── prisma/          schema + seed script
+├── src/              Express API
+└── public/           pre-built React frontend (static HTML/CSS/JS —
+                       nothing to build on Railway, just committed as-is)
+```
+
+There is **no separate frontend source folder in this deploy** — the React
+app is already compiled into `backend/public`. This keeps the folder
+structure shallow on purpose, since manually copying a repo (drag-and-drop,
+zip upload, etc.) is where folder nesting tends to get lost. The React
+source will be added back as its own tracked folder in a later pass once
+the deploy pipeline is confirmed working; for now, edits to the UI mean
+rebuilding and replacing `backend/public`.
+
+Everything runs as **one Railway service**: Express serves both the API
+(`/api/...`) and the static frontend from `backend/public`.
 
 ## Local development
 
@@ -28,42 +38,25 @@ cp .env.example .env        # set DATABASE_URL to a local Postgres instance
 npm install
 npx prisma migrate dev --name init
 npm run seed                # creates the admin user + a week of demo shifts
-npm run dev                 # http://localhost:4000 (API only)
-
-# in a second terminal, for frontend hot-reload:
-cd backend/frontend
-npm install
-npm run dev                 # http://localhost:5173, proxies /api to :4000
+npm run dev                 # http://localhost:4000 — serves API + the app
 ```
-
-For a production-style run: `cd backend && npm run build && npm start` builds
-the frontend into `backend/public` and serves everything from one process.
 
 ## Deploying on Railway
 
-This project is already connected to a Railway service (`Dynamo-Rota`,
-`rootDirectory: backend`) with a Postgres database attached in the same
-project. To ship this version:
-
-Unzip so `backend/` (including the nested `backend/frontend/`) replaces the
-existing `backend/` folder in the repo, then:
-
-```bash
-git add -A
-git commit -m "Replace day/night rota with shift-block model (ref/period/type/vehicle/area/crew)"
-git push origin main
-```
-
-Railway auto-deploys on push. Environment variables already set on the
-service: `JWT_SECRET`, `DATABASE_URL` (references the Postgres service).
-`npm start` runs `prisma migrate deploy` automatically before starting, so
-the schema is applied on every deploy.
+The Railway service (`Dynamo-v4`) already has `rootDirectory: backend`, a
+Postgres database attached in the same project, and `DATABASE_URL` /
+`JWT_SECRET` set. To ship this version, replace the repo's `backend/` folder
+with the one in this zip (via GitHub Desktop or git — see the conversation
+this came from for exact steps), then push. Railway auto-deploys on push.
+`npm start` runs `prisma migrate deploy` before starting, so the schema is
+applied on every deploy.
 
 **One-off seed** (creates the admin login + a week of demo shifts) — run once
-after the first deploy, from the Railway dashboard's service shell, or:
+after the first successful deploy, from the Railway dashboard's service
+shell, or:
 
 ```bash
-railway run --service Dynamo-Rota npm run seed
+railway run --service Dynamo-v4 npm run seed
 ```
 
 ## Default login
@@ -83,5 +76,6 @@ change-password UI yet; update it via the database or add one).
 
 Not yet built (next passes): Calendar view, Availability, Timesheets, Leave
 Requests, Shift Swaps, Incident Reporting, Policy Centre, Training, KPI
-Dashboard, Vehicles/Documents management, Reports, Audit Log — see the
-project description for the full target feature set.
+Dashboard, Vehicles/Documents management, Reports, Audit Log, and bringing
+the React source back as an editable folder in the repo — see the project
+description for the full target feature set.
