@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  STAFF
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(STAFF)
+  qualification String? // e.g. PARA, ECA, TECH, NQP1
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  crewSlots    ShiftCrew[]
+}
+
+enum ShiftType {
+  CORE
+  RRV
+  RELIEF
+  TRAINING
+  STANDBY
+}
+
+enum ShiftStatus {
+  DRAFT
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+model Shift {
+  id         String      @id @default(cuid())
+  ref        String      @unique
+  date       DateTime    // calendar date this shift belongs to
+  startTime  DateTime    // full timestamp of shift start
+  endTime    DateTime    // full timestamp of shift end
+  type       ShiftType   @default(CORE)
+  status     ShiftStatus @default(CONFIRMED)
+  vehicle    String?
+  area       String?
+  notes      String?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  crew       ShiftCrew[]
+}
+
+model ShiftCrew {
+  id        String   @id @default(cuid())
+  shiftId   String
+  shift     Shift    @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  position  Int      // 1 or 2 - crew slot order
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  roleLabel String?  // e.g. PARA, ECA, TECH, NQP1 - snapshot label shown on shift
+
+  @@unique([shiftId, position])
+}
