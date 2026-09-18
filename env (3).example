@@ -1,0 +1,5 @@
+DATABASE_URL=postgresql://user:password@localhost:5432/dynamo
+JWT_SECRET=change-this-to-a-long-random-string
+PORT=4000
+SEED_ADMIN_EMAIL=darren.teale@medicalemergencysolutions.co.uk
+SEED_ADMIN_PASSWORD=ChangeMe123!
