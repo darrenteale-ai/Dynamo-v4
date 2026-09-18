@@ -13,12 +13,7 @@ current spec.
 - `backend/` — Node.js + Express + Prisma + PostgreSQL, JWT auth. Also builds
   and serves the frontend's static files, so only **one Railway service** is
   needed.
-- `backend/frontend/` — React + Vite. It lives *inside* `backend/` (not next
-  to it) on purpose: the Railway service is configured with
-  `rootDirectory: backend`, which means the build only has access to files
-  inside that folder — a sibling `../frontend` is invisible to it. Nesting it
-  here is what lets `backend`'s build script reach it without any Railway
-  config changes.
+- `frontend/` — React + Vite.
 
 ## Local development
 
@@ -31,7 +26,7 @@ npm run seed                # creates the admin user + a week of demo shifts
 npm run dev                 # http://localhost:4000 (API only)
 
 # in a second terminal, for frontend hot-reload:
-cd backend/frontend
+cd frontend
 npm install
 npm run dev                 # http://localhost:5173, proxies /api to :4000
 ```
@@ -44,9 +39,6 @@ the frontend into `backend/public` and serves everything from one process.
 This project is already connected to a Railway service (`Dynamo-Rota`,
 `rootDirectory: backend`) with a Postgres database attached in the same
 project. To ship this version:
-
-Unzip so `backend/` (including the nested `backend/frontend/`) replaces the
-existing `backend/` folder in the repo, then:
 
 ```bash
 git add -A
