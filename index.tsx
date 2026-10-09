@@ -112,7 +112,7 @@ async function snapshotDatabase() {
   const tables = [
     "users", "incidents", "incident_audit_log", "incident_attachments", "corrective_actions",
     "safety_alerts", "safety_alert_acks", "app_settings", "case_notes", "case_note_entries", "gdpr_log",
-    "vehicles", "vdi_checks", "vehicle_defects",
+    "vehicles", "vdi_checks", "vehicle_defects", "assets", "asset_issues",
   ];
   const out: Record<string, any[]> = {};
   for (const t of tables) out[t] = (await sql.unsafe(`SELECT * FROM ${t}`)) as any[];
@@ -631,6 +631,48 @@ async function ensureSchema() {
       resolution_notes TEXT
     )
   `;
+
+  // ---- Company assets ----
+  await sql`
+    CREATE TABLE IF NOT EXISTS assets (
+      id SERIAL PRIMARY KEY,
+      asset_tag TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'OTHER',
+      make_model TEXT,
+      serial_number TEXT,
+      location TEXT,
+      status TEXT NOT NULL DEFAULT 'AVAILABLE',
+      purchase_date DATE,
+      purchase_cost NUMERIC(10,2),
+      service_due DATE,
+      calibration_due DATE,
+      pat_due DATE,
+      notes TEXT,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS asset_issues (
+      id SERIAL PRIMARY KEY,
+      asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+      issued_to_name TEXT,
+      vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+      issued_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      issued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      due_back DATE,
+      issue_notes TEXT,
+      returned_at TIMESTAMPTZ,
+      returned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      return_condition TEXT,
+      return_notes TEXT
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS asset_issues_asset ON asset_issues (asset_id, issued_at DESC)`;
+  // At most one open issue per asset.
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS asset_issues_one_open ON asset_issues (asset_id) WHERE returned_at IS NULL`;
 
   // ---- GDPR support ----
   await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS anonymised_at TIMESTAMPTZ`;
@@ -1425,6 +1467,7 @@ async function renderPrivacyPage() {
 <li><strong>If you submit an incident report:</strong> your name, optionally your email address (so we can send you a reference), the vehicle registration, call sign, crew names, CAD reference, the date, time and place of the incident, your description, and any photos you attach. Near-miss reports can be made anonymously.</li>
 <li><strong>People mentioned in a report</strong> (for example patients, members of the public or colleagues): names and details that the reporter or investigating manager records. Reports about clinical care, safeguarding, medication or injuries may include <strong>information about a person's health</strong>, which is special category data.</li>
 <li><strong>If you complete a vehicle daily check:</strong> your name, the vehicle, its mileage, the check results and any defects you describe.</li>
+<li><strong>If company equipment is issued to you:</strong> your name, the item, when it was issued and returned, and its condition on return.</li>
 <li><strong>Managers and administrators who use Dynamo:</strong> name, work email, phone number, role, sign-in credentials (stored only as a secure hash), and a record of actions taken on each incident.</li>
 </ul>
 
@@ -1445,6 +1488,7 @@ async function renderPrivacyPage() {
 <li>Case notes: ${monthsLabel(r.caseNoteMonths, "in line with our records retention schedule")} after the last entry.</li>
 <li>Staff accounts: until ${monthsLabel(r.inactiveStaffMonths, "a reasonable period")} after the account is closed, then anonymised.</li>
 <li>Vehicle daily checks: ${monthsLabel(r.vdiMonths, "in line with our records retention schedule")} after the check, unless a defect from it is still open.</li>
+<li>Equipment issue records: for as long as the item is held by the company, so that we can account for it; you can ask for your name to be removed once the item is returned.</li>
 </ul>
 
 <h2>Keeping it secure</h2>
@@ -1489,7 +1533,7 @@ const GDPR_ADMIN_PAGE = `<!doctype html><html lang="en-GB"><head><meta charset="
 
   <section data-panel="person">
     <div class="card">
-      <p>Find everything Dynamo holds about one person (including vehicle checks they completed, matched by name), for a subject access request (copy of data) or an erasure request (anonymise).</p>
+      <p>Find everything Dynamo holds about one person (including vehicle checks they completed and equipment issued to them, matched by name), for a subject access request (copy of data) or an erasure request (anonymise).</p>
       <label>Staff account (if they have one)</label><select id="userId"><option value="">— not a staff member —</option></select>
       <div class="row">
         <div><label>Email address (e.g. a public reporter)</label><input id="email" type="email"/></div>
@@ -1788,6 +1832,14 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
         WHERE d.reported_by ILIKE ${like} ORDER BY d.reported_at ASC
       `
     : [];
+  const equipmentIssued = subject.name
+    ? await sql`
+        SELECT i.id, a.asset_tag, a.name AS asset_name, i.issued_to_name, i.issued_at, i.due_back, i.issue_notes,
+          i.returned_at, i.return_condition, i.return_notes
+        FROM asset_issues i JOIN assets a ON a.id = i.asset_id
+        WHERE i.issued_to_name ILIKE ${like} ORDER BY i.issued_at ASC
+      `
+    : [];
   const caseNoteIds = (caseNotes as any[]).map((n) => n.id);
   const caseNoteEntries = caseNoteIds.length
     ? await sql`SELECT id, case_note_id, body, author_id, created_at FROM case_note_entries WHERE case_note_id IN ${sql(caseNoteIds)}`
@@ -1813,6 +1865,7 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
     caseNoteEntries,
     vehicleChecks,
     vehicleDefectsReported,
+    equipmentIssued,
   };
 }
 
@@ -1876,6 +1929,11 @@ async function anonymiseSubject(
       WHERE reported_by ~* ${rx} RETURNING id
     `;
     summary.vehicleDefectsAnonymised = vd.length;
+    const ai = await sql`
+      UPDATE asset_issues SET issued_to_name = regexp_replace(issued_to_name, ${rx}, ${label}, 'gi')
+      WHERE issued_to_name ~* ${rx} RETURNING id
+    `;
+    summary.equipmentIssuesAnonymised = ai.length;
     for (const r of rows as any[]) {
       await logIncidentAudit(r.id, auth, "ANONYMISED", `Named individual anonymised following a data protection request`);
     }
@@ -2405,6 +2463,271 @@ async function notifyVdiDefects(reg: string, callSign: string | null, items: str
   );
 }
 
+// =====================================================================
+// Company assets: equipment register with issue / return tracking.
+// Managers and admins only. Items can be issued to a named person
+// (crew are not Dynamo users, so this is a free-text name) and/or a
+// vehicle; each issue is kept as history once returned.
+// =====================================================================
+
+const ASSET_CATEGORIES = ["MEDICAL", "COMMS", "IT", "UNIFORM_PPE", "OTHER"];
+const ASSET_STATUSES = ["AVAILABLE", "ISSUED", "IN_REPAIR", "LOST", "RETIRED"];
+const RETURN_CONDITIONS = ["GOOD", "DAMAGED", "LOST"];
+
+function serializeAsset(row: any) {
+  return {
+    id: row.id,
+    assetTag: row.asset_tag,
+    name: row.name,
+    category: row.category,
+    makeModel: row.make_model,
+    serialNumber: row.serial_number,
+    location: row.location,
+    status: row.status,
+    purchaseDate: toDateStr(row.purchase_date),
+    purchaseCost: row.purchase_cost !== null && row.purchase_cost !== undefined ? Number(row.purchase_cost) : null,
+    serviceDue: toDateStr(row.service_due),
+    calibrationDue: toDateStr(row.calibration_due),
+    patDue: toDateStr(row.pat_due),
+    serviceStatus: dueStatus(row.service_due),
+    calibrationStatus: dueStatus(row.calibration_due),
+    patStatus: dueStatus(row.pat_due),
+    notes: row.notes,
+    active: row.active,
+    createdAt: row.created_at,
+    currentIssue: row.issue_id
+      ? {
+          id: row.issue_id,
+          issuedToName: row.issue_to_name,
+          vehicleId: row.issue_vehicle_id,
+          vehicleReg: row.issue_vehicle_reg,
+          issuedAt: row.issue_at,
+          dueBack: toDateStr(row.issue_due_back),
+          overdue: !!row.issue_due_back && dueStatus(row.issue_due_back) === "OVERDUE",
+        }
+      : null,
+  };
+}
+
+function serializeAssetIssue(row: any) {
+  return {
+    id: row.id,
+    assetId: row.asset_id,
+    assetTag: row.asset_tag,
+    assetName: row.asset_name,
+    category: row.category,
+    issuedToName: row.issued_to_name,
+    vehicleId: row.vehicle_id,
+    vehicleReg: row.vehicle_reg,
+    issuedAt: row.issued_at,
+    issuedByName: row.issued_by_name,
+    dueBack: toDateStr(row.due_back),
+    overdue: !row.returned_at && !!row.due_back && dueStatus(row.due_back) === "OVERDUE",
+    issueNotes: row.issue_notes,
+    returnedAt: row.returned_at,
+    returnedByName: row.returned_by_name,
+    returnCondition: row.return_condition,
+    returnNotes: row.return_notes,
+  };
+}
+
+async function listAssets(includeArchived: boolean) {
+  return await sql`
+    SELECT a.*, i.id AS issue_id, i.issued_to_name AS issue_to_name, i.vehicle_id AS issue_vehicle_id,
+      v.reg AS issue_vehicle_reg, i.issued_at AS issue_at, i.due_back AS issue_due_back
+    FROM assets a
+    LEFT JOIN asset_issues i ON i.asset_id = a.id AND i.returned_at IS NULL
+    LEFT JOIN vehicles v ON v.id = i.vehicle_id
+    WHERE ${includeArchived} OR a.active = TRUE
+    ORDER BY a.active DESC, a.category, a.name, a.asset_tag
+  `;
+}
+
+async function getAsset(id: number) {
+  const [row] = await sql`
+    SELECT a.*, i.id AS issue_id, i.issued_to_name AS issue_to_name, i.vehicle_id AS issue_vehicle_id,
+      v.reg AS issue_vehicle_reg, i.issued_at AS issue_at, i.due_back AS issue_due_back
+    FROM assets a
+    LEFT JOIN asset_issues i ON i.asset_id = a.id AND i.returned_at IS NULL
+    LEFT JOIN vehicles v ON v.id = i.vehicle_id
+    WHERE a.id = ${id}
+  `;
+  return row || null;
+}
+
+async function listAssetIssues(opts: { assetId?: number | null; openOnly?: boolean; limit?: number }) {
+  const assetId = opts.assetId ?? null;
+  const openOnly = !!opts.openOnly;
+  return await sql`
+    SELECT i.*, a.asset_tag, a.name AS asset_name, a.category, v.reg AS vehicle_reg,
+      ub.name AS issued_by_name, ur.name AS returned_by_name
+    FROM asset_issues i
+    JOIN assets a ON a.id = i.asset_id
+    LEFT JOIN vehicles v ON v.id = i.vehicle_id
+    LEFT JOIN users ub ON ub.id = i.issued_by
+    LEFT JOIN users ur ON ur.id = i.returned_by
+    WHERE (${assetId}::int IS NULL OR i.asset_id = ${assetId})
+      AND (${openOnly} = FALSE OR i.returned_at IS NULL)
+    ORDER BY (i.returned_at IS NULL) DESC, COALESCE(i.returned_at, i.issued_at) DESC
+    LIMIT ${opts.limit ?? 300}
+  `;
+}
+
+function assetFields(body: any) {
+  const cost = body.purchaseCost === "" || body.purchaseCost === null || body.purchaseCost === undefined ? null : Number(body.purchaseCost);
+  return {
+    assetTag: cleanText(body.assetTag, 40)?.toUpperCase() ?? null,
+    name: cleanText(body.name, 120),
+    category: ASSET_CATEGORIES.includes(body.category) ? body.category : "OTHER",
+    makeModel: cleanText(body.makeModel, 120),
+    serialNumber: cleanText(body.serialNumber, 80),
+    location: cleanText(body.location, 120),
+    purchaseDate: cleanDate(body.purchaseDate),
+    purchaseCost: cost !== null && Number.isFinite(cost) && cost >= 0 ? Math.round(cost * 100) / 100 : null,
+    serviceDue: cleanDate(body.serviceDue),
+    calibrationDue: cleanDate(body.calibrationDue),
+    patDue: cleanDate(body.patDue),
+    notes: cleanText(body.notes, 2000),
+  };
+}
+
+async function assetTagTaken(tag: string, exceptId: number | null) {
+  const [row] = await sql`
+    SELECT id FROM assets WHERE upper(asset_tag) = ${tag.toUpperCase()} AND (${exceptId}::int IS NULL OR id <> ${exceptId})
+  `;
+  return !!row;
+}
+
+async function nextAssetTag(): Promise<string> {
+  const [{ max }] = await sql`
+    SELECT COALESCE(MAX(CAST(substring(asset_tag FROM '^A-([0-9]+)$') AS INT)), 0) AS max FROM assets
+  `;
+  return `A-${String(Number(max || 0) + 1).padStart(4, "0")}`;
+}
+
+async function handleAssetsRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+  if (!path.startsWith("/api/assets")) return null;
+  const auth = await getAuth(req);
+  if (!auth) return json({ error: "Unauthorized" }, 401);
+  if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+
+  if (path === "/api/assets/summary" && method === "GET") {
+    const assets = ((await listAssets(false)) as any[]).map(serializeAsset).filter((a) => a.status !== "RETIRED");
+    const dueKeys = ["serviceStatus", "calibrationStatus", "patStatus"] as const;
+    return json({
+      total: assets.length,
+      available: assets.filter((a) => a.status === "AVAILABLE").length,
+      issued: assets.filter((a) => a.currentIssue).length,
+      overdueReturns: assets.filter((a) => a.currentIssue?.overdue).length,
+      inRepair: assets.filter((a) => a.status === "IN_REPAIR").length,
+      lost: assets.filter((a) => a.status === "LOST").length,
+      overdueChecks: assets.reduce((n, a) => n + dueKeys.filter((k) => a[k] === "OVERDUE").length, 0),
+      dueSoonChecks: assets.reduce((n, a) => n + dueKeys.filter((k) => a[k] === "DUE_SOON").length, 0),
+    });
+  }
+
+  if (path === "/api/assets" && method === "GET") {
+    const rows = await listAssets(url.searchParams.get("archived") === "1");
+    return json((rows as any[]).map(serializeAsset));
+  }
+
+  if (path === "/api/assets/issues" && method === "GET") {
+    const openOnly = url.searchParams.get("open") === "1";
+    return json((await listAssetIssues({ openOnly, limit: openOnly ? 1000 : 300 })).map(serializeAssetIssue));
+  }
+
+  if (path === "/api/assets/next-tag" && method === "GET") {
+    return json({ assetTag: await nextAssetTag() });
+  }
+
+  if (path === "/api/assets" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const f = assetFields(body);
+    if (!f.name) return json({ error: "Item name is required" }, 400);
+    const tag = f.assetTag || (await nextAssetTag());
+    if (await assetTagTaken(tag, null)) return json({ error: `Asset tag ${tag} is already used` }, 400);
+    const status = ["AVAILABLE", "IN_REPAIR", "LOST", "RETIRED"].includes(body.status) ? body.status : "AVAILABLE";
+    const [row] = await sql`
+      INSERT INTO assets (asset_tag, name, category, make_model, serial_number, location, status, purchase_date, purchase_cost,
+        service_due, calibration_due, pat_due, notes)
+      VALUES (${tag}, ${f.name}, ${f.category}, ${f.makeModel}, ${f.serialNumber}, ${f.location}, ${status}, ${f.purchaseDate},
+        ${f.purchaseCost}, ${f.serviceDue}, ${f.calibrationDue}, ${f.patDue}, ${f.notes})
+      RETURNING id
+    `;
+    return json(serializeAsset(await getAsset(row.id)), 201);
+  }
+
+  const idMatch = path.match(/^\/api\/assets\/(\d+)(\/(issue|return|history))?$/);
+  if (!idMatch) return json({ error: "Not found" }, 404);
+  const id = Number(idMatch[1]);
+  const action = idMatch[3] || null;
+  const current = await getAsset(id);
+  if (!current) return json({ error: "Asset not found" }, 404);
+
+  if (!action && method === "PUT") {
+    const body = await req.json().catch(() => ({}));
+    const f = assetFields(body);
+    if (!f.name) return json({ error: "Item name is required" }, 400);
+    const tag = f.assetTag || current.asset_tag;
+    if (await assetTagTaken(tag, id)) return json({ error: `Asset tag ${tag} is already used` }, 400);
+    const active = body.active === false ? false : true;
+    if (!active && current.issue_id) return json({ error: "Return this item before archiving it." }, 400);
+    // ISSUED is controlled by issue/return; other statuses can be set by hand.
+    let status = current.status;
+    if (current.issue_id) status = "ISSUED";
+    else if (["AVAILABLE", "IN_REPAIR", "LOST", "RETIRED"].includes(body.status)) status = body.status;
+    await sql`
+      UPDATE assets SET asset_tag = ${tag}, name = ${f.name}, category = ${f.category}, make_model = ${f.makeModel},
+        serial_number = ${f.serialNumber}, location = ${f.location}, status = ${status}, purchase_date = ${f.purchaseDate},
+        purchase_cost = ${f.purchaseCost}, service_due = ${f.serviceDue}, calibration_due = ${f.calibrationDue},
+        pat_due = ${f.patDue}, notes = ${f.notes}, active = ${active}, updated_at = now()
+      WHERE id = ${id}
+    `;
+    return json(serializeAsset(await getAsset(id)));
+  }
+
+  if (action === "history" && method === "GET") {
+    return json((await listAssetIssues({ assetId: id })).map(serializeAssetIssue));
+  }
+
+  if (action === "issue" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    if (!current.active) return json({ error: "This item is archived." }, 400);
+    if (current.issue_id) return json({ error: `Already issued to ${current.issue_to_name || current.issue_vehicle_reg}. Return it first.` }, 400);
+    if (["LOST", "RETIRED"].includes(current.status)) return json({ error: "Lost or retired items cannot be issued." }, 400);
+    if (current.status === "IN_REPAIR") return json({ error: "This item is in repair. Set it back to Available (Edit details) before issuing it." }, 400);
+    const name = cleanText(body.issuedToName, 120);
+    const vehicleId = body.vehicleId ? Number(body.vehicleId) : null;
+    if (!name && !vehicleId) return json({ error: "Enter who it is issued to, or choose a vehicle." }, 400);
+    if (vehicleId) {
+      const [v] = await sql`SELECT id FROM vehicles WHERE id = ${vehicleId}`;
+      if (!v) return json({ error: "Vehicle not found" }, 400);
+    }
+    await sql`
+      INSERT INTO asset_issues (asset_id, issued_to_name, vehicle_id, issued_by, due_back, issue_notes)
+      VALUES (${id}, ${name}, ${vehicleId}, ${auth.sub}, ${cleanDate(body.dueBack)}, ${cleanText(body.notes, 1000)})
+    `;
+    await sql`UPDATE assets SET status = 'ISSUED', updated_at = now() WHERE id = ${id}`;
+    return json(serializeAsset(await getAsset(id)));
+  }
+
+  if (action === "return" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    if (!current.issue_id) return json({ error: "This item is not currently issued." }, 400);
+    const condition = RETURN_CONDITIONS.includes(body.condition) ? body.condition : "GOOD";
+    await sql`
+      UPDATE asset_issues SET returned_at = now(), returned_by = ${auth.sub}, return_condition = ${condition},
+        return_notes = ${cleanText(body.notes, 1000)}
+      WHERE id = ${current.issue_id}
+    `;
+    const newStatus = condition === "DAMAGED" ? "IN_REPAIR" : condition === "LOST" ? "LOST" : "AVAILABLE";
+    await sql`UPDATE assets SET status = ${newStatus}, updated_at = now() WHERE id = ${id}`;
+    return json(serializeAsset(await getAsset(id)));
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
 // Public base URL for links printed on QR codes (Railway's proxy sets the
 // forwarded headers; PUBLIC_URL can override, e.g. for a custom domain).
 function publicOrigin(req: Request): string {
@@ -2771,6 +3094,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (gdprResponse) return gdprResponse;
     const fleetResponse = await handleFleetRequest(req, url, path, method, ip);
     if (fleetResponse) return fleetResponse;
+    const assetsResponse = await handleAssetsRequest(req, url, path, method);
+    if (assetsResponse) return assetsResponse;
 
     if (path === "/api/auth/login" && method === "POST") {
       const body = await req.json().catch(() => ({}));

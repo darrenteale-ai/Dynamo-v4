@@ -600,6 +600,15 @@ const api = {
   updateDefect: (id, data) => request(`/fleet/defects/${id}`, { method: 'PUT', body: data }),
   getVdiSetup: () => request('/public/vdi/setup'),
   submitVdi: (data) => request('/public/vdi', { method: 'POST', body: data }),
+  getAssetSummary: () => request('/assets/summary'),
+  listAssets: (archived) => request('/assets', { params: { archived: archived ? 1 : undefined } }),
+  getNextAssetTag: () => request('/assets/next-tag'),
+  createAsset: (data) => request('/assets', { method: 'POST', body: data }),
+  updateAsset: (id, data) => request(`/assets/${id}`, { method: 'PUT', body: data }),
+  issueAsset: (id, data) => request(`/assets/${id}/issue`, { method: 'POST', body: data }),
+  returnAsset: (id, data) => request(`/assets/${id}/return`, { method: 'POST', body: data }),
+  getAssetHistory: (id) => request(`/assets/${id}/history`),
+  listAssetIssues: (openOnly) => request('/assets/issues', { params: { open: openOnly ? 1 : undefined } }),
 };
 
 async function downloadBlob(path) {
@@ -746,6 +755,9 @@ function buildNav(isAdmin) {
     nav.push({ section: 'FLEET', items: [
       { to: '/fleet', label: 'Fleet Management', icon: '🚑' },
     ] });
+    nav.push({ section: 'ASSETS', items: [
+      { to: '/assets', label: 'Company Assets', icon: '📦' },
+    ] });
   }
   if (isAdmin) {
     nav.push({ section: 'RESOURCES', items: [
@@ -761,7 +773,7 @@ function Layout({ children }) {
   const { user, logout } = useAuth();
   const NAV = buildNav(isMgrOrAdmin(user?.role));
   const location = useLocation();
-  const pageTitle = location.pathname.startsWith('/fleet') ? 'Fleet Management' : 'Incident Reporting';
+  const pageTitle = location.pathname.startsWith('/fleet') ? 'Fleet Management' : location.pathname.startsWith('/assets') ? 'Company Assets' : 'Incident Reporting';
 
   return (
     <div className="app-shell">
@@ -4529,6 +4541,595 @@ function FleetManagement() {
   );
 }
 
+// ---------------- Company assets ----------------
+const ASSET_CATEGORY_LABELS = { MEDICAL: 'Medical equipment', COMMS: 'Radios & phones', IT: 'IT equipment', UNIFORM_PPE: 'Uniform & PPE', OTHER: 'Other' };
+const ASSET_STATUS_LABELS = { AVAILABLE: 'Available', ISSUED: 'Issued', IN_REPAIR: 'In repair', LOST: 'Lost', RETIRED: 'Retired' };
+const ASSET_STATUS_BADGE = { AVAILABLE: 'badge-green', ISSUED: 'badge-blue', IN_REPAIR: 'badge-amber', LOST: 'badge-red', RETIRED: 'badge-grey' };
+const ASSET_DUE_FIELDS = [
+  { key: 'serviceDue', status: 'serviceStatus', label: 'Service' },
+  { key: 'calibrationDue', status: 'calibrationStatus', label: 'Calibration' },
+  { key: 'patDue', status: 'patStatus', label: 'PAT test' },
+];
+const RETURN_CONDITION_LABELS = { GOOD: 'Good — back in service', DAMAGED: 'Damaged — send for repair', LOST: 'Lost / not returned' };
+
+function assetHolder(a) {
+  const i = a.currentIssue;
+  if (!i) return a.location ? <span>{a.location}</span> : <span className="muted">—</span>;
+  const who = [i.issuedToName, i.vehicleReg].filter(Boolean).join(' · ');
+  return (
+    <span>
+      <strong>{who}</strong>
+      {i.dueBack && (
+        <div style={{ fontSize: 12, ...(i.overdue ? { color: '#b91c1c', fontWeight: 700 } : { color: 'var(--muted, #64748b)' }) }}>
+          {i.overdue ? 'Overdue — due back ' : 'Due back '}{shortDateStr(i.dueBack)}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function AssetModal({ asset, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    assetTag: asset?.assetTag || '',
+    name: asset?.name || '',
+    category: asset?.category || 'MEDICAL',
+    makeModel: asset?.makeModel || '',
+    serialNumber: asset?.serialNumber || '',
+    location: asset?.location || '',
+    status: asset?.status || 'AVAILABLE',
+    purchaseDate: asset?.purchaseDate || '',
+    purchaseCost: asset?.purchaseCost ?? '',
+    serviceDue: asset?.serviceDue || '',
+    calibrationDue: asset?.calibrationDue || '',
+    patDue: asset?.patDue || '',
+    notes: asset?.notes || '',
+  });
+  const [tagHint, setTagHint] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const isIssued = asset?.status === 'ISSUED';
+
+  useEffect(() => {
+    if (!asset) api.getNextAssetTag().then((r) => setTagHint(r.assetTag)).catch(() => {});
+  }, []);
+
+  function set(field) {
+    return (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+  }
+
+  async function save(overrides) {
+    setError('');
+    setBusy(true);
+    try {
+      const data = { ...form, ...(overrides || {}) };
+      if (asset) await api.updateAsset(asset.id, data);
+      else await api.createAsset(data);
+      onSaved();
+    } catch (err) {
+      setError(err.message || 'Failed to save asset');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={(e) => { e.preventDefault(); save(); }}>
+        <div className="modal-header">
+          <h2>{asset ? `Edit ${asset.assetTag}` : 'Add asset'}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        {error && <div className="error-banner">{error}</div>}
+
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Item name</label>
+            <input value={form.name} onChange={set('name')} placeholder="e.g. Lifepak 15 defibrillator" required autoFocus />
+          </div>
+          <div className="form-field">
+            <label>Asset tag</label>
+            <input value={form.assetTag} onChange={set('assetTag')} placeholder={tagHint ? `Leave blank for ${tagHint}` : 'e.g. A-0001'} />
+          </div>
+          <div className="form-field">
+            <label>Category</label>
+            <select value={form.category} onChange={set('category')}>
+              {Object.entries(ASSET_CATEGORY_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          </div>
+          <div className="form-field">
+            <label>Status</label>
+            {isIssued ? (
+              <input value="Issued (return it to change)" disabled />
+            ) : (
+              <select value={form.status} onChange={set('status')}>
+                {['AVAILABLE', 'IN_REPAIR', 'LOST', 'RETIRED'].map((k) => <option key={k} value={k}>{ASSET_STATUS_LABELS[k]}</option>)}
+              </select>
+            )}
+          </div>
+          <div className="form-field">
+            <label>Make and model</label>
+            <input value={form.makeModel} onChange={set('makeModel')} placeholder="e.g. Physio-Control Lifepak 15" />
+          </div>
+          <div className="form-field">
+            <label>Serial number</label>
+            <input value={form.serialNumber} onChange={set('serialNumber')} />
+          </div>
+          <div className="form-field">
+            <label>Usual location</label>
+            <input value={form.location} onChange={set('location')} placeholder="e.g. Main base store, Vehicle MES1" />
+          </div>
+          <div className="form-field" />
+          <div className="form-field">
+            <label>Next service due</label>
+            <input type="date" value={form.serviceDue} onChange={set('serviceDue')} />
+          </div>
+          <div className="form-field">
+            <label>Next calibration due</label>
+            <input type="date" value={form.calibrationDue} onChange={set('calibrationDue')} />
+          </div>
+          <div className="form-field">
+            <label>Next PAT / electrical test due</label>
+            <input type="date" value={form.patDue} onChange={set('patDue')} />
+          </div>
+          <div className="form-field" />
+          <div className="form-field">
+            <label>Purchase date</label>
+            <input type="date" value={form.purchaseDate} onChange={set('purchaseDate')} />
+          </div>
+          <div className="form-field">
+            <label>Purchase cost (£)</label>
+            <input type="number" min="0" step="0.01" value={form.purchaseCost} onChange={set('purchaseCost')} />
+          </div>
+          <div className="form-field form-field-wide">
+            <label>Notes</label>
+            <textarea value={form.notes} onChange={set('notes')} rows={3} />
+          </div>
+        </div>
+
+        <div className="modal-footer">
+          {asset ? (
+            asset.active ? (
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={busy || isIssued}
+                title={isIssued ? 'Return the item before archiving it' : undefined}
+                onClick={() => { if (confirm(`Archive ${asset.assetTag}? It will be hidden from the register. Its issue history is kept.`)) save({ active: false }); }}
+              >
+                Archive asset
+              </button>
+            ) : (
+              <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => save({ active: true })}>Restore asset</button>
+            )
+          ) : <div />}
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save asset'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function IssueAssetModal({ asset, vehicles, onClose, onSaved }) {
+  const [form, setForm] = useState({ issuedToName: '', vehicleId: '', dueBack: '', notes: '' });
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  function set(field) {
+    return (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+  }
+  async function save() {
+    setError('');
+    if (!form.issuedToName.trim() && !form.vehicleId) { setError('Enter who it is issued to, or choose a vehicle.'); return; }
+    setBusy(true);
+    try {
+      await api.issueAsset(asset.id, { ...form, vehicleId: form.vehicleId ? Number(form.vehicleId) : null });
+      onSaved();
+    } catch (err) {
+      setError(err.message || 'Failed to issue item');
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" style={{ maxWidth: 560 }} onMouseDown={(e) => e.stopPropagation()} onSubmit={(e) => { e.preventDefault(); save(); }}>
+        <div className="modal-header">
+          <h2>Issue {asset.assetTag}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <p className="muted" style={{ fontStyle: 'normal', marginTop: 0 }}>{asset.name}{asset.serialNumber ? ` · S/N ${asset.serialNumber}` : ''}</p>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Issued to (name)</label>
+            <input value={form.issuedToName} onChange={set('issuedToName')} placeholder="e.g. Sam Patel" autoFocus />
+          </div>
+          <div className="form-field">
+            <label>Vehicle (optional)</label>
+            <select value={form.vehicleId} onChange={set('vehicleId')}>
+              <option value="">— none —</option>
+              {vehicles.map((v) => <option key={v.id} value={v.id}>{v.reg}{v.callSign ? ` — ${v.callSign}` : ''}</option>)}
+            </select>
+          </div>
+          <div className="form-field">
+            <label>Due back (optional)</label>
+            <input type="date" value={form.dueBack} onChange={set('dueBack')} />
+          </div>
+          <div className="form-field" />
+          <div className="form-field form-field-wide">
+            <label>Notes</label>
+            <textarea value={form.notes} onChange={set('notes')} rows={2} placeholder="e.g. For the weekend event; charger included" />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Issue item'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ReturnAssetModal({ asset, onClose, onSaved }) {
+  const [condition, setCondition] = useState('GOOD');
+  const [notes, setNotes] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const i = asset.currentIssue || {};
+  async function save() {
+    setError('');
+    if (condition !== 'GOOD' && !notes.trim()) { setError('Please describe the damage or what happened.'); return; }
+    setBusy(true);
+    try {
+      await api.returnAsset(asset.id, { condition, notes });
+      onSaved();
+    } catch (err) {
+      setError(err.message || 'Failed to record return');
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" style={{ maxWidth: 560 }} onMouseDown={(e) => e.stopPropagation()} onSubmit={(e) => { e.preventDefault(); save(); }}>
+        <div className="modal-header">
+          <h2>Return {asset.assetTag}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <p className="muted" style={{ fontStyle: 'normal', marginTop: 0 }}>
+          {asset.name} — issued to {[i.issuedToName, i.vehicleReg].filter(Boolean).join(' · ')} on {shortDateStr(i.issuedAt)}
+        </p>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-field">
+          <label>Condition on return</label>
+          {Object.entries(RETURN_CONDITION_LABELS).map(([k, l]) => (
+            <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 400, margin: '4px 0' }}>
+              <input type="radio" name="cond" checked={condition === k} onChange={() => setCondition(k)} style={{ width: 'auto' }} /> {l}
+            </label>
+          ))}
+        </div>
+        <div className="form-field">
+          <label>Notes{condition !== 'GOOD' ? ' (required)' : ''}</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} />
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Record return'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function AssetDetailModal({ asset, onClose, onEdit, onIssue, onReturn }) {
+  const [history, setHistory] = useState(null);
+  useEffect(() => {
+    api.getAssetHistory(asset.id).then(setHistory).catch(() => setHistory([]));
+  }, [asset.id]);
+  const row = (label, value) => (
+    <div style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+      <div className="muted" style={{ fontStyle: 'normal', width: 170, flexShrink: 0 }}>{label}</div>
+      <div>{value}</div>
+    </div>
+  );
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>{asset.assetTag} — {asset.name}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {row('Status', <span className={'badge ' + (ASSET_STATUS_BADGE[asset.status] || 'badge-grey')}>{ASSET_STATUS_LABELS[asset.status] || asset.status}</span>)}
+        {row('Category', ASSET_CATEGORY_LABELS[asset.category] || asset.category)}
+        {row(asset.currentIssue ? 'With' : 'Location', assetHolder(asset))}
+        {row('Make / model', asset.makeModel || '—')}
+        {row('Serial number', asset.serialNumber || '—')}
+        {ASSET_DUE_FIELDS.map((f) => <React.Fragment key={f.key}>{row(f.label + ' due', <DueCell date={asset[f.key]} status={asset[f.status]} />)}</React.Fragment>)}
+        {row('Purchased', [asset.purchaseDate ? shortDateStr(asset.purchaseDate) : null, asset.purchaseCost != null ? `£${Number(asset.purchaseCost).toLocaleString('en-GB', { minimumFractionDigits: 2 })}` : null].filter(Boolean).join(' · ') || '—')}
+        {asset.notes && row('Notes', <span style={{ whiteSpace: 'pre-wrap' }}>{asset.notes}</span>)}
+
+        <h3 style={{ margin: '18px 0 8px', fontSize: 15 }}>Issue history</h3>
+        {history === null ? (
+          <div className="muted">Loading…</div>
+        ) : history.length === 0 ? (
+          <div className="muted">Never issued.</div>
+        ) : (
+          <table className="table">
+            <thead><tr><th>Issued to</th><th>Out</th><th>Back</th><th>Condition</th></tr></thead>
+            <tbody>
+              {history.map((h) => (
+                <tr key={h.id}>
+                  <td>
+                    {[h.issuedToName, h.vehicleReg].filter(Boolean).join(' · ')}
+                    {h.issueNotes && <div className="muted" style={{ fontSize: 12 }}>{h.issueNotes}</div>}
+                  </td>
+                  <td>{shortDateStr(h.issuedAt)}<div className="muted" style={{ fontSize: 12 }}>{h.issuedByName ? `by ${h.issuedByName}` : ''}</div></td>
+                  <td>
+                    {h.returnedAt ? shortDateStr(h.returnedAt) : <span className={'badge ' + (h.overdue ? 'badge-red' : 'badge-blue')}>{h.overdue ? 'Overdue' : 'Still out'}</span>}
+                    {h.returnedByName && <div className="muted" style={{ fontSize: 12 }}>by {h.returnedByName}</div>}
+                  </td>
+                  <td>
+                    {h.returnCondition ? <span className={'badge ' + (h.returnCondition === 'GOOD' ? 'badge-green' : 'badge-red')}>{h.returnCondition === 'GOOD' ? 'Good' : h.returnCondition === 'DAMAGED' ? 'Damaged' : 'Lost'}</span> : '—'}
+                    {h.returnNotes && <div style={{ fontSize: 12, marginTop: 2 }}>{h.returnNotes}</div>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <div className="modal-footer">
+          <button type="button" className="btn btn-ghost" onClick={onEdit}>Edit details</button>
+          <div className="modal-footer-right">
+            {asset.currentIssue
+              ? <button type="button" className="btn btn-primary" onClick={onReturn}>Return item</button>
+              : asset.active && !['LOST', 'RETIRED', 'IN_REPAIR'].includes(asset.status) && <button type="button" className="btn btn-primary" onClick={onIssue}>Issue item</button>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CompanyAssets() {
+  const [tab, setTab] = useState('assets');
+  const [summary, setSummary] = useState(null);
+  const [assets, setAssets] = useState([]);
+  const [issues, setIssues] = useState([]);
+  const [vehicles, setVehicles] = useState([]);
+  const [showArchived, setShowArchived] = useState(false);
+  const [search, setSearch] = useState('');
+  const [category, setCategory] = useState('');
+  const [status, setStatus] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [editing, setEditing] = useState(null); // asset or 'new'
+  const [viewing, setViewing] = useState(null);
+  const [issuing, setIssuing] = useState(null);
+  const [returning, setReturning] = useState(null);
+
+  function loadAll() {
+    setError('');
+    return Promise.all([
+      api.getAssetSummary().then(setSummary),
+      api.listAssets(showArchived).then(setAssets),
+      api.listAssetIssues(tab === 'issued').then(setIssues),
+      api.listVehicles(false).then(setVehicles).catch(() => setVehicles([])),
+    ])
+      .catch((err) => setError(err.message || 'Failed to load assets'))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived, tab]);
+
+  function done() {
+    setEditing(null); setIssuing(null); setReturning(null); setViewing(null);
+    loadAll();
+  }
+
+  if (loading) return <div className="page-loading">Loading…</div>;
+
+  const q = search.trim().toLowerCase();
+  const shown = assets.filter((a) =>
+    (!category || a.category === category) &&
+    (!status || a.status === status) &&
+    (!q || [a.assetTag, a.name, a.makeModel, a.serialNumber, a.location, a.currentIssue?.issuedToName, a.currentIssue?.vehicleReg]
+      .filter(Boolean).some((v) => String(v).toLowerCase().includes(q)))
+  );
+  const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Company Assets</h1>
+          <div className="page-sub">Equipment register, service dates and who has what</div>
+        </div>
+        <div className="page-header-actions">
+          <button className="btn btn-primary" onClick={() => setEditing('new')}>+ Add asset</button>
+        </div>
+      </div>
+
+      {error && <div className="error-banner" style={{ marginBottom: 12 }}>{error}</div>}
+
+      {summary && (
+        <div className="kpi-grid">
+          <div className="kpi-card kpi-card-green">
+            <div className="kpi-value">{summary.total}</div>
+            <div className="kpi-label">Assets in service</div>
+            <div className="kpi-sub">{summary.available} available now</div>
+          </div>
+          <div className={'kpi-card ' + (summary.overdueReturns ? 'kpi-card-red' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.issued}</div>
+            <div className="kpi-label">Issued out</div>
+            <div className="kpi-sub">{summary.overdueReturns} overdue for return</div>
+          </div>
+          <div className={'kpi-card ' + (summary.overdueChecks ? 'kpi-card-red' : summary.dueSoonChecks ? 'kpi-card-amber' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.overdueChecks}</div>
+            <div className="kpi-label">Overdue service / calibration / PAT</div>
+            <div className="kpi-sub">{summary.dueSoonChecks} due in the next 30 days</div>
+          </div>
+          <div className={'kpi-card ' + (summary.inRepair || summary.lost ? 'kpi-card-amber' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.inRepair}</div>
+            <div className="kpi-label">In repair</div>
+            <div className="kpi-sub">{summary.lost} recorded as lost</div>
+          </div>
+        </div>
+      )}
+
+      <div className="tabs">
+        <button className={'tab-btn' + (tab === 'assets' ? ' active' : '')} onClick={() => setTab('assets')}>Assets</button>
+        <button className={'tab-btn' + (tab === 'issued' ? ' active' : '')} onClick={() => setTab('issued')}>
+          Issued out{summary?.issued ? ` (${summary.issued})` : ''}
+        </button>
+        <button className={'tab-btn' + (tab === 'history' ? ' active' : '')} onClick={() => setTab('history')}>History</button>
+      </div>
+
+      {tab === 'assets' && (
+        <div className="card table-card">
+          <div style={{ padding: '10px 16px', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search tag, name, serial, person…" style={{ flex: '1 1 220px' }} />
+            <select value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="">All categories</option>
+              {Object.entries(ASSET_CATEGORY_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+            <select value={status} onChange={(e) => setStatus(e.target.value)}>
+              <option value="">Any status</option>
+              {Object.entries(ASSET_STATUS_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              Show archived
+            </label>
+          </div>
+          {assets.length === 0 ? (
+            <div className="empty">No assets yet. Use “+ Add asset” to start your equipment register.</div>
+          ) : shown.length === 0 ? (
+            <div className="empty">No assets match these filters.</div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Asset</th>
+                    <th>Category</th>
+                    <th>Status</th>
+                    <th>Where / who</th>
+                    {ASSET_DUE_FIELDS.map((f) => <th key={f.key}>{f.label}</th>)}
+                    <th className="actions-cell"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map((a) => (
+                    <tr key={a.id} className="row-clickable" onClick={() => setViewing(a)} style={a.active ? undefined : { opacity: 0.55 }}>
+                      <td>
+                        <div className="ref-link">{a.assetTag}</div>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>{a.name}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          {[a.makeModel, a.serialNumber ? `S/N ${a.serialNumber}` : null].filter(Boolean).join(' · ')}
+                          {!a.active ? ' · archived' : ''}
+                        </div>
+                      </td>
+                      <td>{ASSET_CATEGORY_LABELS[a.category] || a.category}</td>
+                      <td><span className={'badge ' + (ASSET_STATUS_BADGE[a.status] || 'badge-grey')}>{ASSET_STATUS_LABELS[a.status] || a.status}</span></td>
+                      <td>{assetHolder(a)}</td>
+                      {ASSET_DUE_FIELDS.map((f) => <td key={f.key}><DueCell date={a[f.key]} status={a[f.status]} /></td>)}
+                      <td className="actions-cell" onClick={(e) => e.stopPropagation()}>
+                        {a.currentIssue
+                          ? <button type="button" className="btn btn-ghost btn-sm" onClick={() => setReturning(a)}>Return</button>
+                          : a.active && !['LOST', 'RETIRED', 'IN_REPAIR'].includes(a.status) && <button type="button" className="btn btn-primary btn-sm" onClick={() => setIssuing(a)}>Issue</button>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(tab === 'issued' || tab === 'history') && (
+        <div className="card table-card">
+          {issues.length === 0 ? (
+            <div className="empty">{tab === 'issued' ? 'Nothing is issued out at the moment.' : 'No equipment has been issued yet.'}</div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Asset</th>
+                    <th>Issued to</th>
+                    <th>Issued</th>
+                    <th>{tab === 'issued' ? 'Due back' : 'Returned'}</th>
+                    {tab === 'history' && <th>Condition</th>}
+                    {tab === 'issued' && <th className="actions-cell"></th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {issues.map((h) => (
+                    <tr key={h.id} className={byId[h.assetId] ? 'row-clickable' : ''} onClick={() => byId[h.assetId] && setViewing(byId[h.assetId])}>
+                      <td>
+                        <div className="ref-link">{h.assetTag}</div>
+                        <div style={{ fontSize: 13 }}>{h.assetName}</div>
+                      </td>
+                      <td>
+                        <strong>{[h.issuedToName, h.vehicleReg].filter(Boolean).join(' · ')}</strong>
+                        {h.issueNotes && <div className="muted" style={{ fontSize: 12 }}>{h.issueNotes}</div>}
+                      </td>
+                      <td>{shortDateStr(h.issuedAt)}<div className="muted" style={{ fontSize: 12 }}>{h.issuedByName ? `by ${h.issuedByName}` : ''}</div></td>
+                      {tab === 'issued' ? (
+                        <td>{h.dueBack ? <DueCell date={h.dueBack} status={h.overdue ? 'OVERDUE' : null} /> : <span className="muted">No date</span>}</td>
+                      ) : (
+                        <td>{h.returnedAt ? shortDateStr(h.returnedAt) : <span className={'badge ' + (h.overdue ? 'badge-red' : 'badge-blue')}>{h.overdue ? 'Overdue' : 'Still out'}</span>}</td>
+                      )}
+                      {tab === 'history' && (
+                        <td>
+                          {h.returnCondition ? <span className={'badge ' + (h.returnCondition === 'GOOD' ? 'badge-green' : 'badge-red')}>{h.returnCondition === 'GOOD' ? 'Good' : h.returnCondition === 'DAMAGED' ? 'Damaged' : 'Lost'}</span> : '—'}
+                          {h.returnNotes && <div style={{ fontSize: 12, marginTop: 2 }}>{h.returnNotes}</div>}
+                        </td>
+                      )}
+                      {tab === 'issued' && (
+                        <td className="actions-cell" onClick={(e) => e.stopPropagation()}>
+                          {byId[h.assetId] && <button type="button" className="btn btn-primary btn-sm" onClick={() => setReturning(byId[h.assetId])}>Return</button>}
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {editing && <AssetModal asset={editing === 'new' ? null : editing} onClose={() => setEditing(null)} onSaved={done} />}
+      {viewing && !editing && !issuing && !returning && (
+        <AssetDetailModal
+          asset={viewing}
+          onClose={() => setViewing(null)}
+          onEdit={() => setEditing(viewing)}
+          onIssue={() => setIssuing(viewing)}
+          onReturn={() => setReturning(viewing)}
+        />
+      )}
+      {issuing && <IssueAssetModal asset={issuing} vehicles={vehicles} onClose={() => setIssuing(null)} onSaved={done} />}
+      {returning && <ReturnAssetModal asset={returning} onClose={() => setReturning(null)} onSaved={done} />}
+    </div>
+  );
+}
+
 // Public, no-login vehicle daily inspection form (QR code in each vehicle).
 function PublicVdi() {
   const [setup, setSetup] = useState(null);
@@ -4761,6 +5362,7 @@ function AppRoutes() {
                 <Route path="/actions" element={<AdminRoute><Actions /></AdminRoute>} />
                 <Route path="/safety-alerts" element={<SafetyAlerts />} />
                 <Route path="/fleet" element={<AdminRoute><FleetManagement /></AdminRoute>} />
+                <Route path="/assets" element={<AdminRoute><CompanyAssets /></AdminRoute>} />
                 <Route path="/staff" element={<AdminRoute><Staff /></AdminRoute>} />
                 <Route path="/case-notes" element={<AdminRoute><CaseNotes /></AdminRoute>} />
                 <Route path="/settings" element={<Settings />} />
