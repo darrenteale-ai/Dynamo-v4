@@ -17,6 +17,7 @@ import {
   ImageRun,
 } from "docx";
 import { imageSize } from "image-size";
+import QRCode from "qrcode";
 
 const JWT_SECRET = Bun.env.JWT_SECRET || "dev-secret-change-me";
 const SEED_ADMIN_EMAIL = Bun.env.SEED_ADMIN_EMAIL || "darren.teale@medicalemergencysolutions.co.uk";
@@ -389,7 +390,12 @@ function loadFrontendGzB64(): string {
   }
   return loadIndexHtmlGzB64();
 }
-const INDEX_HTML_GZ_B64 = loadFrontendGzB64();
+// Since deploying from GitHub, the frontend lives in the repo as frontend.html
+// and is used when present; the env-var builds remain as a fallback.
+const FRONTEND_FILE = `${import.meta.dir}/frontend.html`;
+const FRONTEND_FROM_FILE: string | null = (await Bun.file(FRONTEND_FILE).exists()) ? await Bun.file(FRONTEND_FILE).text() : null;
+if (FRONTEND_FROM_FILE) console.log(`Frontend: using frontend.html from the repo (${FRONTEND_FROM_FILE.length} chars)`);
+const INDEX_HTML_GZ_B64 = FRONTEND_FROM_FILE ? "" : loadFrontendGzB64();
 {
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(INDEX_HTML_GZ_B64);
@@ -397,7 +403,7 @@ const INDEX_HTML_GZ_B64 = loadFrontendGzB64();
     `INDEX_HTML_GZ_B64 loaded: length=${INDEX_HTML_GZ_B64.length} sha256=${hasher.digest("hex")}`
   );
 }
-const INDEX_HTML_RAW = new TextDecoder("utf-8").decode(Bun.gunzipSync(Buffer.from(INDEX_HTML_GZ_B64, "base64")));
+const INDEX_HTML_RAW = FRONTEND_FROM_FILE ?? new TextDecoder("utf-8").decode(Bun.gunzipSync(Buffer.from(INDEX_HTML_GZ_B64, "base64")));
 
 async function ensureSchema() {
   // Older deploy attempts may have left behind tables with an incompatible
@@ -2399,6 +2405,70 @@ async function notifyVdiDefects(reg: string, callSign: string | null, items: str
   );
 }
 
+// Public base URL for links printed on QR codes (Railway's proxy sets the
+// forwarded headers; PUBLIC_URL can override, e.g. for a custom domain).
+function publicOrigin(req: Request): string {
+  if (Bun.env.PUBLIC_URL) return Bun.env.PUBLIC_URL.replace(/\/+$/, "");
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || new URL(req.url).host;
+  const proto = req.headers.get("x-forwarded-proto") || (host.startsWith("localhost") || host.startsWith("127.") ? "http" : "https");
+  return `${proto.split(",")[0].trim()}://${host}`;
+}
+
+const FLEET_QR_PAGE = `<!doctype html><html lang="en-GB"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="robots" content="noindex"/><title>Vehicle check QR codes</title><style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: #1d1d1b; background: #f4f4f2; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 14px 16px; background: #fff; border-bottom: 1px solid #e2e1dc; position: sticky; top: 0; }
+  .bar h1 { font-size: 18px; margin: 0 auto 0 0; }
+  .bar label { font-size: 14px; color: #5f5f5a; display: flex; gap: 6px; align-items: center; }
+  button { font: inherit; padding: 8px 14px; border-radius: 7px; border: 0; background: #b4231c; color: #fff; cursor: pointer; }
+  .msg { padding: 24px 16px; max-width: 640px; }
+  .sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; padding: 16px; }
+  .tag { background: #fff; border: 2px dashed #c9c8c2; border-radius: 10px; padding: 14px; text-align: center; break-inside: avoid; page-break-inside: avoid; }
+  .tag .head { background: #b4231c; color: #fff; font-weight: 700; border-radius: 6px; padding: 5px 8px; font-size: 14px; letter-spacing: .02em; }
+  .tag svg { width: 100%; max-width: 200px; height: auto; display: block; margin: 10px auto 6px; }
+  .tag .reg { font-size: 22px; font-weight: 800; letter-spacing: .06em; }
+  .tag .sub { font-size: 13px; color: #5f5f5a; min-height: 1.2em; }
+  .tag .how { font-size: 12px; color: #1d1d1b; margin-top: 6px; }
+  .tag.general .head { background: #1d1d1b; }
+  @media print {
+    @page { size: A4; margin: 10mm; }
+    body { background: #fff; }
+    .bar { display: none; }
+    .sheet { grid-template-columns: repeat(3, 1fr); gap: 6mm; padding: 0; }
+    .tag { border-color: #999; }
+    .hide-general .general { display: none; }
+  }
+</style></head><body>
+<div class="bar">
+  <h1>Vehicle check QR codes</h1>
+  <label><input type="checkbox" id="incGeneral" checked/> Include general code (any vehicle)</label>
+  <button onclick="window.print()">Print</button>
+</div>
+<div id="out" class="msg">Loading\u2026</div>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+document.getElementById("incGeneral").onchange = (e) => document.body.classList.toggle("hide-general", !e.target.checked);
+(async () => {
+  const out = document.getElementById("out");
+  let token = null;
+  try { token = localStorage.getItem("dynamo_token"); } catch {}
+  if (!token) { out.innerHTML = 'Please <a href="/">sign in to Dynamo</a> as a manager, then open Fleet Management \u2192 Print QR codes again.'; return; }
+  const res = await fetch("/api/fleet/qr", { headers: { Authorization: "Bearer " + token } });
+  if (res.status === 401 || res.status === 403) { out.innerHTML = 'Your session has expired or you are not a manager. <a href="/">Sign in to Dynamo</a> and try again.'; return; }
+  if (!res.ok) { out.textContent = "Could not load vehicles (" + res.status + ")."; return; }
+  const d = await res.json();
+  const tag = (head, big, sub, svg, extra) =>
+    '<div class="tag' + extra + '"><div class="head">' + head + '</div>' + svg +
+    '<div class="reg">' + esc(big) + '</div><div class="sub">' + esc(sub) + '</div>' +
+    '<div class="how">Scan before every shift \u00b7 no login</div></div>';
+  const tags = d.vehicles.map((v) => tag("VEHICLE DAILY CHECK", v.reg, [v.callSign, v.vehicleType].filter(Boolean).join(" \u00b7 "), v.svg, ""));
+  tags.push(tag("VEHICLE DAILY CHECK", "Any vehicle", "Choose the vehicle on the form", d.generalSvg, " general"));
+  out.className = "sheet";
+  out.innerHTML = (d.vehicles.length ? "" : '<p style="grid-column:1/-1">No vehicles yet \u2014 add them in Fleet Management to get a code for each one.</p>') + tags.join("");
+})().catch((e) => { document.getElementById("out").textContent = "Something went wrong: " + e.message; });
+</script></body></html>`;
+
 async function handleFleetRequest(req: Request, url: URL, path: string, method: string, ip: string): Promise<Response | null> {
   // ---- Public (no login): the crew VDI form ----
   if (path === "/api/public/vdi/setup" && method === "GET") {
@@ -2469,6 +2539,23 @@ async function handleFleetRequest(req: Request, url: URL, path: string, method: 
   const auth = await getAuth(req);
   if (!auth) return json({ error: "Unauthorized" }, 401);
   if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+
+  if (path === "/api/fleet/qr" && method === "GET") {
+    const origin = publicOrigin(req);
+    const qr = (text: string) => QRCode.toString(text, { type: "svg", errorCorrectionLevel: "M", margin: 1 });
+    const generalUrl = `${origin}/vdi`;
+    const vehicles = ((await listVehicles(false)) as any[]).map(serializeVehicle);
+    return json({
+      generalUrl,
+      generalSvg: await qr(generalUrl),
+      vehicles: await Promise.all(
+        vehicles.map(async (v) => {
+          const vUrl = `${origin}/vdi?reg=${encodeURIComponent(v.reg.replace(/\s+/g, ""))}`;
+          return { id: v.id, reg: v.reg, callSign: v.callSign, vehicleType: v.vehicleType, url: vUrl, svg: await qr(vUrl) };
+        })
+      ),
+    });
+  }
 
   if (path === "/api/fleet/summary" && method === "GET") {
     const vehicles = ((await listVehicles(false)) as any[]).map(serializeVehicle);
@@ -2669,6 +2756,11 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
 
     if (path === "/privacy" && method === "GET") {
       return new Response(await renderPrivacyPage(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+    if (path === "/fleet/qr" && method === "GET") {
+      return new Response(FLEET_QR_PAGE, {
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+      });
     }
     if (path === "/gdpr" && method === "GET") {
       return new Response(GDPR_ADMIN_PAGE, {

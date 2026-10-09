@@ -2,11 +2,14 @@
   "name": "dynamo-app",
   "private": true,
   "type": "module",
-  "scripts": { "start": "bun index.tsx" },
+  "scripts": {
+    "start": "bun index.tsx"
+  },
   "dependencies": {
     "bcryptjs": "3.0.3",
     "docx": "9.9.0",
     "image-size": "2.0.4",
-    "jsonwebtoken": "9.0.3"
+    "jsonwebtoken": "9.0.3",
+    "qrcode": "1.5.4"
   }
 }
