@@ -3094,8 +3094,9 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (gdprResponse) return gdprResponse;
     const fleetResponse = await handleFleetRequest(req, url, path, method, ip);
     if (fleetResponse) return fleetResponse;
-    const assetsResponse = await handleAssetsRequest(req, url, path, method);
-    if (assetsResponse) return assetsResponse;
+    // Company Assets has been removed from the app. Its API is switched off
+    // (requests fall through to 404), but the assets / asset_issues tables
+    // and their data are kept, and still covered by the GDPR tools.
 
     if (path === "/api/auth/login" && method === "POST") {
       const body = await req.json().catch(() => ({}));
