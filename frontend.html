@@ -2878,6 +2878,8 @@ function localTimeStr(d) {
   return `${hh}:${mi}`;
 }
 
+const PUBLIC_REPORT_LOCATIONS = ['LUTON BASE', 'STEVENAGE', 'SOUTHALL'];
+
 function PublicReport() {
   const [occurredDate, setOccurredDate] = useState(localDateStr(new Date()));
   const [occurredTime, setOccurredTime] = useState(localTimeStr(new Date()));
@@ -3137,7 +3139,10 @@ function PublicReport() {
 
           <div className="form-field form-field-wide">
             <label>Location</label>
-            <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="e.g. Luton depot" />
+            <select value={location} onChange={(e) => setLocation(e.target.value)} required>
+              <option value="" disabled>Select location…</option>
+              {PUBLIC_REPORT_LOCATIONS.map((l) => <option key={l} value={l}>{l}</option>)}
+            </select>
           </div>
 
           <div className="form-field form-field-wide">
