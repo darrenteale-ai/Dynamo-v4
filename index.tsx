@@ -1069,6 +1069,12 @@ function computeCompliance(row: any) {
     if (!CQC_TYPES[row.cqc_type]) closureBlockers.push("CQC: choose the notification type.");
     if (!row.cqc_submitted_at) closureBlockers.push("CQC: record the date the notification was sent.");
   }
+  // Sign-off is mandatory before closing.
+  const blank = (v: any) => !String(v ?? "").trim();
+  if (blank(row.signature_name)) closureBlockers.push("Sign-off: enter the signature (typed name).");
+  if (blank(row.investigator_name)) closureBlockers.push("Sign-off: enter the investigator name.");
+  if (blank(row.designation)) closureBlockers.push("Sign-off: enter the designation.");
+  if (!row.sign_off_date) closureBlockers.push("Sign-off: enter the sign-off date.");
 
   return { candour, riddor, cqc, closureBlockers };
 }
@@ -3949,7 +3955,14 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       // Closing an incident: every regulatory step must be recorded first.
       const newStatus = INCIDENT_STATUSES.includes(body.status) ? body.status : before.status;
       if (newStatus === "CLOSED") {
-        const { closureBlockers } = computeCompliance({ ...before, ...reg });
+        const { closureBlockers } = computeCompliance({
+          ...before,
+          ...reg,
+          signature_name: body.signatureName,
+          investigator_name: body.investigatorName,
+          designation: body.designation,
+          sign_off_date: body.signOffDate,
+        });
         if (closureBlockers.length) {
           return json({
             error: `This incident can't be closed yet:\n• ${closureBlockers.join("\n• ")}`,

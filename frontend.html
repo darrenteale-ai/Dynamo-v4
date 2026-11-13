@@ -1193,6 +1193,10 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
       if (!cqcType) out.push('CQC: choose the notification type.');
       if (!cqcSubmittedAt) out.push('CQC: record the date the notification was sent.');
     }
+    if (!signatureName.trim()) out.push('Sign-off: enter the signature (typed name).');
+    if (!investigatorName.trim()) out.push('Sign-off: enter the investigator name.');
+    if (!designation.trim()) out.push('Sign-off: enter the designation.');
+    if (!signOffDate) out.push('Sign-off: enter the sign-off date.');
     return out;
   }
 
@@ -2098,22 +2102,29 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
               </div>
 
               <div className="settings-section-title settings-section-spaced">Sign-off</div>
+              <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+                All sign-off fields are mandatory before the incident can be closed.
+              </div>
               <div className="form-grid">
                 <div className="form-field">
-                  <label>Signature (typed name)</label>
-                  <input value={signatureName} onChange={(e) => setSignatureName(e.target.value)} />
+                  <label>Signature (typed name) <span style={{ color: 'var(--red)' }}>*</span></label>
+                  <input value={signatureName} onChange={(e) => setSignatureName(e.target.value)}
+                    required={status === 'CLOSED'} style={status === 'CLOSED' && !signatureName.trim() ? { borderColor: 'var(--red)' } : undefined} />
                 </div>
                 <div className="form-field">
-                  <label>Investigator name</label>
-                  <input value={investigatorName} onChange={(e) => setInvestigatorName(e.target.value)} />
+                  <label>Investigator name <span style={{ color: 'var(--red)' }}>*</span></label>
+                  <input value={investigatorName} onChange={(e) => setInvestigatorName(e.target.value)}
+                    required={status === 'CLOSED'} style={status === 'CLOSED' && !investigatorName.trim() ? { borderColor: 'var(--red)' } : undefined} />
                 </div>
                 <div className="form-field">
-                  <label>Designation</label>
-                  <input value={designation} onChange={(e) => setDesignation(e.target.value)} />
+                  <label>Designation <span style={{ color: 'var(--red)' }}>*</span></label>
+                  <input value={designation} onChange={(e) => setDesignation(e.target.value)} placeholder="e.g. Operations Manager"
+                    required={status === 'CLOSED'} style={status === 'CLOSED' && !designation.trim() ? { borderColor: 'var(--red)' } : undefined} />
                 </div>
                 <div className="form-field">
-                  <label>Date</label>
-                  <input type="date" value={signOffDate} onChange={(e) => setSignOffDate(e.target.value)} />
+                  <label>Date <span style={{ color: 'var(--red)' }}>*</span></label>
+                  <input type="date" value={signOffDate} onChange={(e) => setSignOffDate(e.target.value)}
+                    required={status === 'CLOSED'} style={status === 'CLOSED' && !signOffDate ? { borderColor: 'var(--red)' } : undefined} />
                 </div>
               </div>
             </>
