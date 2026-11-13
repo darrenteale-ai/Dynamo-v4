@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en-GB"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Dynamo User Guide</title>
+<style>
+:root { --navy:#0b1f3a; --blue:#2563eb; --bg:#f5f6f8; --card:#fff; --text:#111827; --muted:#5b6474; --line:#e5e7eb; --amber:#fff7e6; --amber-line:#f2c25b; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0f1520; --card:#161e2b; --text:#e6e9ef; --muted:#9aa4b5; --line:#263043; --amber:#2a2414; --amber-line:#8a6d22; --blue:#6ea0ff; } }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:16px; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { background:var(--navy); color:#fff; padding:28px 24px 26px; }
+header .wrap { max-width:1160px; margin:0 auto; display:flex; align-items:center; gap:16px; }
+.logo { width:44px; height:44px; border-radius:12px; background:#fff; color:var(--navy); font-weight:800; font-size:24px; display:flex; align-items:center; justify-content:center; position:relative; flex-shrink:0; }
+.logo::after { content:""; position:absolute; top:-4px; right:-4px; width:13px; height:13px; border-radius:50%; background:#3b82f6; border:2px solid var(--navy); }
+header h1 { margin:0; font-size:26px; letter-spacing:.2px; }
+header p { margin:2px 0 0; color:#b9c7dd; font-size:14px; }
+header .back { margin-left:auto; color:#fff; text-decoration:none; font-size:14px; border:1px solid rgba(255,255,255,.35); padding:7px 12px; border-radius:8px; white-space:nowrap; }
+header .back:hover { background:rgba(255,255,255,.1); }
+.layout { max-width:1160px; margin:0 auto; display:grid; grid-template-columns:240px 1fr; gap:28px; padding:28px 24px 60px; }
+nav { position:sticky; top:16px; align-self:start; max-height:calc(100vh - 32px); overflow:auto; }
+nav .label { font-size:11px; font-weight:700; letter-spacing:1px; color:var(--muted); text-transform:uppercase; margin:0 0 8px 10px; }
+nav a { display:block; padding:7px 10px; border-radius:7px; color:var(--text); text-decoration:none; font-size:14px; }
+nav a:hover { background:var(--card); }
+nav a.on { background:var(--card); color:var(--blue); font-weight:600; box-shadow:inset 3px 0 0 var(--blue); }
+main { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px 40px 40px; min-width:0; }
+h2 { font-size:22px; margin:40px 0 10px; padding-top:22px; border-top:1px solid var(--line); }
+main > h2:first-child { border-top:0; margin-top:16px; }
+h3 { font-size:17px; margin:26px 0 6px; }
+p, li { max-width:72ch; }
+ul, ol { padding-left:22px; } li { margin:3px 0; }
+a { color:var(--blue); }
+code { background:var(--bg); padding:1px 6px; border-radius:5px; font-size:.9em; }
+blockquote { margin:16px 0; padding:12px 16px; background:var(--amber); border-left:4px solid var(--amber-line); border-radius:6px; }
+blockquote p { margin:0; }
+.tbl { overflow-x:auto; margin:14px 0; border:1px solid var(--line); border-radius:10px; }
+table { border-collapse:collapse; width:100%; font-size:14.5px; }
+th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { background:var(--bg); font-weight:600; }
+tr:last-child td { border-bottom:0; }
+hr { display:none; }
+.top { display:inline-block; margin-top:30px; font-size:14px; }
+@media (max-width:860px) {
+  .layout { grid-template-columns:1fr; padding:16px 12px 40px; gap:14px; }
+  nav { position:static; max-height:none; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 8px; }
+  main { padding:6px 18px 28px; }
+}
+</style></head>
+<body>
+<header><div class="wrap"><div class="logo">D</div><div>
+<h1>Dynamo User Guide</h1>
+<p>Incident reporting, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.0, 13 November 2026</p>
+</div><a class="back" href="/settings">← Back to Dynamo</a></div></header>
+<div class="layout">
+<nav aria-label="Contents"><div class="label">Contents</div><a href="#sec-1-introduction">1. Introduction</a><a href="#sec-2-reporting-an-incident-crew-qr-form">2. Reporting an incident (crew — QR form)</a><a href="#sec-3-reporting-an-incident-managers-inside-dynamo">3. Reporting an incident (managers — inside Dynamo)</a><a href="#sec-4-managing-incidents">4. Managing incidents</a><a href="#sec-5-harm-and-duty-of-candour">5. Harm and duty of candour</a><a href="#sec-6-riddor-and-cqc-reporting">6. RIDDOR and CQC reporting</a><a href="#sec-7-investigating-and-closing-an-incident">7. Investigating and closing an incident</a><a href="#sec-8-photos-actions-alerts-audit-trail-and-exports">8. Photos, actions, alerts, audit trail and exports</a><a href="#sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes and fleet</a><a href="#sec-10-admin-tasks">10. Admin tasks</a><a href="#sec-11-quick-reference">11. Quick reference</a></nav>
+<main>
+<h2 id="sec-1-introduction">1. Introduction</h2>
+<p>Dynamo is where we record, investigate and learn from incidents, near misses, complaints and safety concerns. It also keeps track of our legal reporting duties (duty of candour, RIDDOR and CQC notifications) and runs vehicle daily checks.</p>
+<p>There are two ways people use Dynamo:</p>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>Who</th>
+<th>How</th>
+<th>Login needed?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Crew and staff on shift</strong></td>
+<td>Scan a QR code to report an incident or complete a vehicle daily check</td>
+<td>No</td>
+</tr>
+<tr>
+<td><strong>Managers and admins</strong></td>
+<td>Sign in to Dynamo to review, investigate and close incidents, and run fleet, staff and settings</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table></div>
+<p>Only manager and admin accounts can sign in. Crew never need an account.</p>
+<h3 id="sec-signing-in">Signing in</h3>
+<ol>
+<li>Go to the Dynamo web address and enter your work email and password.</li>
+<li>Your session lasts 12 hours, then you'll need to sign in again.</li>
+<li>After 5 wrong passwords your account is locked for 15 minutes. If you've forgotten your password, ask an admin to reset it (see section 10).</li>
+</ol>
+<h3 id="sec-finding-your-way-around">Finding your way around</h3>
+<p>The sidebar on the left has these pages:</p>
+<ul>
+<li><strong>Dashboard</strong> — a summary of incidents, deadlines and trends.</li>
+<li><strong>Incident Reporting</strong> — the list of all incidents. This is where most work happens.</li>
+<li><strong>Corrective Actions</strong> — every open action from every incident, with owners and due dates.</li>
+<li><strong>Safety Alerts</strong> — alerts raised from incidents, which staff must read and acknowledge.</li>
+<li><strong>Fleet Management</strong> — vehicles, key dates, daily checks and defects.</li>
+<li><strong>Staff</strong> — manager and admin accounts.</li>
+<li><strong>Case Notes</strong> — running notes on ongoing matters.</li>
+<li><strong>Settings</strong> — your details, password, deadlines and admin tools.</li>
+</ul>
+<p>A <strong>Privacy notice</strong> link appears at the bottom of every page.</p>
+<hr />
+<h2 id="sec-2-reporting-an-incident-crew-qr-form">2. Reporting an incident (crew — QR form)</h2>
+<p>Every vehicle and base has a QR code that opens the incident report form. No login is needed. A manager can show the code on screen from <strong>Incident Reporting → Show QR code</strong>.</p>
+<h3 id="sec-filling-in-the-form">Filling in the form</h3>
+<ol>
+<li><strong>Name of person reporting</strong> — your name.</li>
+<li><strong>Date and time</strong> of the incident (defaults to now — change it if the incident was earlier).</li>
+<li><strong>Vehicle registration</strong> and <strong>call sign</strong>.</li>
+<li><strong>CAD Ref</strong>, if there is one.</li>
+<li><strong>Incident type</strong> — Clinical, Medication, Vehicle Damage, Safeguarding, Complaint, Near Miss, Violence or Infection Control.</li>
+<li><strong>Was anyone hurt or injured, or is this a safeguarding concern?</strong> — answer honestly. If you answer <strong>Yes</strong>, managers are alerted the moment you submit.</li>
+<li><strong>Crew members</strong> — names and grades of both crew.</li>
+<li><strong>Email address</strong> — so you get a confirmation with your reference number.</li>
+<li><strong>Was the on-call manager informed?</strong> — if yes, their name and the time you called.</li>
+<li><strong>Location</strong> — Luton Base, Stevenage or Southall.</li>
+<li><strong>Incident description</strong> — what happened, in your own words. Stick to facts.</li>
+<li><strong>Photos</strong> (optional) — up to 6, for example vehicle damage or the scene. They're shrunk automatically so they upload on a weak signal.</li>
+</ol>
+<p>Press <strong>Submit report</strong>. You'll see a reference number like <strong>13/11/2026 - 0004</strong>. Note it down and quote it in any follow-up.</p>
+<blockquote>
+<p><strong>If anyone is in immediate danger, call 999 first.</strong> The form is for recording, not for emergencies.</p>
+</blockquote>
+<h3 id="sec-anonymous-near-miss-reports">Anonymous near-miss reports</h3>
+<p>If you choose <strong>Near Miss</strong>, you can tick <strong>Report this near miss anonymously</strong>. Your email won't be recorded and no confirmation is sent. Anonymous reporting is only available for near misses.</p>
+<h3 id="sec-what-happens-next">What happens next</h3>
+<ul>
+<li>The report goes straight into Dynamo as <strong>OPEN</strong> with severity <strong>LOW</strong>. A manager sets the real severity when they review it.</li>
+<li>Managers are emailed immediately if you said someone was hurt, or if the type is Safeguarding or Violence.</li>
+<li>A manager must be allocated to the incident within the allocation window (24 hours by default).</li>
+</ul>
+<hr />
+<h2 id="sec-3-reporting-an-incident-managers-inside-dynamo">3. Reporting an incident (managers — inside Dynamo)</h2>
+<p>Managers can also log incidents directly:</p>
+<ol>
+<li>Go to <strong>Incident Reporting</strong> and click <strong>+ Report incident</strong>.</li>
+<li>Fill in the date, time, location, category, severity and what happened. CAD ref, call sign, crew names and people involved are optional.</li>
+<li>Click save. Choosing <strong>HIGH</strong> or <strong>CRITICAL</strong> severity emails all managers and admins straight away.</li>
+</ol>
+<hr />
+<h2 id="sec-4-managing-incidents">4. Managing incidents</h2>
+<h3 id="sec-the-incident-list">The incident list</h3>
+<p><strong>Incident Reporting</strong> shows every incident, newest first. Each row shows:</p>
+<ul>
+<li><strong>Severity</strong> — LOW, MEDIUM, HIGH or CRITICAL.</li>
+<li><strong>Status</strong> — OPEN, INVESTIGATING or CLOSED, plus amber or red badges for anything regulatory still to do (for example <em>Candour: decide</em>, <em>RIDDOR: to submit</em>, <em>CQC: overdue</em>).</li>
+<li><strong>Response</strong> — how close the incident is to its response deadline: <em>On track</em>, <em>Due soon</em> (within 24 hours) or <em>Overdue</em>.</li>
+<li><strong>Allocation</strong> — whether a responsible manager has been assigned in time.</li>
+</ul>
+<p><strong>Filters</strong> let you narrow the list by search text, status, severity, category, responsible manager, date range, and these tick-boxes:</p>
+<ul>
+<li><strong>RIDDOR</strong> / <strong>CQC</strong> — incidents flagged for either.</li>
+<li><strong>Unallocated overdue</strong> — no manager assigned and the allocation deadline has passed.</li>
+<li><strong>Candour / RIDDOR / CQC action due</strong> — anything with a regulatory step still outstanding.</li>
+</ul>
+<h3 id="sec-deadlines-on-every-incident">Deadlines on every incident</h3>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>Deadline</th>
+<th>Default</th>
+<th>Measured from</th>
+<th>What happens if missed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Allocate a responsible manager</td>
+<td>24 hours</td>
+<td>When the report arrives</td>
+<td>Shown red; banner on the incident</td>
+</tr>
+<tr>
+<td>Respond to the incident</td>
+<td>5 days</td>
+<td>Date of the incident</td>
+<td>Shown red; escalation email to managers and admins 24 hours after it goes overdue</td>
+</tr>
+</tbody>
+</table></div>
+<p>Admins can change both in <strong>Settings</strong>.</p>
+<h3 id="sec-opening-an-incident">Opening an incident</h3>
+<p>Click any row to open it. At the top you'll see the details from the report, then these sections:</p>
+<ul>
+<li><strong>Photos &amp; statements</strong> — files attached to the incident.</li>
+<li><strong>Corrective actions</strong> — what we're doing to stop it happening again.</li>
+<li><strong>Safety alert</strong> — raise an alert for all staff.</li>
+<li><strong>Status</strong> and <strong>Admin notes</strong>.</li>
+<li><strong>Risk assessment</strong> — likelihood × impact matrix.</li>
+<li><strong>Investigation — reference details</strong> — responsible manager, CAD ref, crew, on-call manager, key dates, related incident.</li>
+<li><strong>Harm and duty of candour</strong>.</li>
+<li><strong>Regulatory reporting</strong> — RIDDOR and CQC.</li>
+<li><strong>Investigation — write-up</strong> — outcome, recommendations, lessons learnt.</li>
+<li><strong>Sign-off</strong>.</li>
+<li><strong>Audit trail</strong>.</li>
+</ul>
+<p>Click <strong>Save changes</strong> at the bottom to save everything in one go.</p>
+<blockquote>
+<p><strong>Every time you open an incident, your name is recorded in the audit trail</strong>, even if you only read it. Only open incidents you have a reason to look at.</p>
+</blockquote>
+<h3 id="sec-allocating-a-responsible-manager">Allocating a responsible manager</h3>
+<p>In <strong>Investigation — reference details</strong>, choose the <strong>Responsible manager</strong> and save. Do this within the allocation window.</p>
+<h3 id="sec-setting-severity-with-the-risk-matrix">Setting severity with the risk matrix</h3>
+<p>In <strong>Risk assessment</strong>, pick a <strong>Likelihood</strong> (Rare to Very likely) and an <strong>Impact</strong> (Trivial to Extreme). Dynamo suggests a severity from the matrix. You can override it by choosing <strong>Severity</strong> directly. Raising severity to HIGH or CRITICAL emails all managers and admins.</p>
+<h3 id="sec-status">Status</h3>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>OPEN</strong></td>
+<td>Reported, not yet being investigated</td>
+</tr>
+<tr>
+<td><strong>INVESTIGATING</strong></td>
+<td>A manager is working on it</td>
+</tr>
+<tr>
+<td><strong>CLOSED</strong></td>
+<td>Finished and signed off. The incident becomes read-only.</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="sec-linking-related-incidents">Linking related incidents</h3>
+<p>If two reports describe the same event, or one follows from another, choose it under <strong>Related / duplicate incident</strong>.</p>
+<hr />
+<h2 id="sec-5-harm-and-duty-of-candour">5. Harm and duty of candour</h2>
+<p>The <strong>duty of candour</strong> (CQC Regulation 20) is a legal duty to be open with people when something goes wrong in their care and causes moderate harm or worse. Dynamo records each step so we can show CQC we did it.</p>
+<h3 id="sec-step-1-record-the-harm-level">Step 1 — Record the harm level</h3>
+<p>In <strong>Harm and duty of candour</strong>, choose the <strong>Harm level</strong>:</p>
+<ul>
+<li>No harm</li>
+<li>Low harm</li>
+<li>Moderate harm</li>
+<li>Severe harm</li>
+<li>Prolonged psychological harm</li>
+<li>Death</li>
+</ul>
+<p>Every incident needs a harm level before it can be closed. Choose <strong>No harm</strong> if nobody was harmed.</p>
+<h3 id="sec-step-2-decide-whether-it-is-a-notifiable-safety-incident">Step 2 — Decide whether it is a notifiable safety incident</h3>
+<p>If the harm is <strong>moderate or worse</strong>, Dynamo asks <strong>Notifiable safety incident?</strong> and the incident shows a <em>Candour: decide</em> badge until you answer.</p>
+<p>It is notifiable if <strong>all</strong> of these are true:</p>
+<ul>
+<li>it was unintended or unexpected;</li>
+<li>it happened while we were providing care; and</li>
+<li>in a clinician's reasonable opinion it caused, or could result in, moderate harm, severe harm, prolonged psychological harm or death.</li>
+</ul>
+<p>Choose <strong>Yes — duty of candour applies</strong> or <strong>No</strong> and save. Dynamo records who made the decision and when. If you're unsure, ask the registered manager or clinical lead before deciding.</p>
+<h3 id="sec-step-3-complete-the-candour-steps">Step 3 — Complete the candour steps</h3>
+<p>When the answer is <strong>Yes</strong>, record each step as you do it:</p>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>What to record</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Tell the person (or their family) in person</td>
+<td><strong>Date person told in person</strong></td>
+</tr>
+<tr>
+<td>Apologise</td>
+<td>Tick <strong>An apology was given</strong></td>
+</tr>
+<tr>
+<td>Follow up in writing</td>
+<td><strong>Date written follow-up sent</strong>, and upload a copy of the letter under Photos &amp; statements</td>
+</tr>
+<tr>
+<td>Share the findings</td>
+<td><strong>Date findings shared</strong>, once the investigation is complete</td>
+</tr>
+</tbody>
+</table></div>
+<p>Use <strong>Candour notes</strong> to record who was told and what support was offered.</p>
+<p>A <strong>Progress</strong> badge shows whether you're on track against the candour target (10 days from the decision by default, set by admins in Settings). The law says "as soon as reasonably practicable", so treat the target as a maximum, not a goal.</p>
+<blockquote>
+<p>Saying sorry is not admitting fault.</p>
+</blockquote>
+<hr />
+<h2 id="sec-6-riddor-and-cqc-reporting">6. RIDDOR and CQC reporting</h2>
+<p>Both live in the <strong>Regulatory reporting</strong> section of an incident.</p>
+<h3 id="sec-riddor-health-and-safety-executive">RIDDOR (Health and Safety Executive)</h3>
+<ol>
+<li>Tick <strong>Reportable under RIDDOR (to HSE)</strong>.</li>
+<li>Choose the <strong>RIDDOR report type</strong>. This sets the deadline:</li>
+</ol>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Deadline (from the date of the incident)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Work-related death</td>
+<td>10 days — and notify HSE without delay</td>
+</tr>
+<tr>
+<td>Specified injury to a worker</td>
+<td>10 days — and notify HSE without delay</td>
+</tr>
+<tr>
+<td>Over-7-day incapacitation of a worker</td>
+<td>15 days</td>
+</tr>
+<tr>
+<td>Non-worker taken to hospital for treatment</td>
+<td>10 days</td>
+</tr>
+<tr>
+<td>Dangerous occurrence</td>
+<td>10 days</td>
+</tr>
+</tbody>
+</table></div>
+<ol start="3">
+<li>Submit the report on the HSE website, then record the <strong>Date submitted to HSE</strong> and the <strong>HSE reference</strong>.</li>
+</ol>
+<p>A badge shows the deadline: <em>On track</em>, <em>Due soon</em> (within 3 days), <em>Overdue</em> or <em>Submitted</em>. For over-7-day injuries, remember the 15 days run from the day of the accident, not from day 7.</p>
+<h3 id="sec-cqc-notifications">CQC notifications</h3>
+<ol>
+<li>Tick <strong>Notifiable to CQC</strong>. The clock starts the moment you save.</li>
+<li>Choose the <strong>CQC notification type</strong>: death, serious injury, abuse or allegation of abuse, police incident, event that stops the service running safely, or other.</li>
+<li>Send the notification to CQC, then record the <strong>Date notification sent</strong> and any <strong>CQC reference</strong>.</li>
+</ol>
+<p>CQC notifications must be sent <strong>without delay</strong>. Dynamo shows <em>Due soon</em> after 12 hours and <em>Overdue</em> after 24 hours.</p>
+<h3 id="sec-deadline-emails">Deadline emails</h3>
+<p>Managers and admins are emailed when a candour, RIDDOR or CQC item is due soon, again if it becomes overdue, and when a candour decision is needed. Each alert is sent once per incident.</p>
+<hr />
+<h2 id="sec-7-investigating-and-closing-an-incident">7. Investigating and closing an incident</h2>
+<h3 id="sec-writing-up-the-investigation">Writing up the investigation</h3>
+<p>In <strong>Investigation — write-up</strong>, record:</p>
+<ul>
+<li><strong>Outcome of investigation</strong> — what you found.</li>
+<li><strong>Recommendations / conclusions</strong>.</li>
+<li><strong>Lessons learnt / action plan</strong>.</li>
+</ul>
+<p>Add <strong>corrective actions</strong> for anything that needs doing (see section 8).</p>
+<h3 id="sec-sign-off-mandatory">Sign-off (mandatory)</h3>
+<p>All four sign-off fields must be completed before an incident can be closed:</p>
+<ul>
+<li><strong>Signature</strong> (typed name)</li>
+<li><strong>Investigator name</strong></li>
+<li><strong>Designation</strong> — for example Operations Manager</li>
+<li><strong>Date</strong></li>
+</ul>
+<h3 id="sec-closing">Closing</h3>
+<p>Set <strong>Status</strong> to <strong>CLOSED</strong>. If anything is missing, a <strong>Before this incident can be closed</strong> checklist appears and the empty sign-off fields are outlined in red. Dynamo won't close the incident until everything on the list is done:</p>
+<ul>
+<li>harm level recorded;</li>
+<li>candour decision made, if harm is moderate or worse;</li>
+<li>all four candour steps recorded, if it is a notifiable safety incident;</li>
+<li>RIDDOR type, date submitted and HSE reference, if RIDDOR reportable;</li>
+<li>CQC notification type and date sent, if CQC notifiable;</li>
+<li>all four sign-off fields.</li>
+</ul>
+<p>Once closed, the incident is <strong>read-only</strong>. It can't be edited or reopened. If new information comes to light, log a new incident and link it using <strong>Related / duplicate incident</strong>.</p>
+<hr />
+<h2 id="sec-8-photos-actions-alerts-audit-trail-and-exports">8. Photos, actions, alerts, audit trail and exports</h2>
+<h3 id="sec-photos-and-statements">Photos and statements</h3>
+<p>In <strong>Photos &amp; statements</strong>, use <strong>Upload photo</strong> or <strong>Upload statement</strong> (up to 20MB each). Click a file to open it, or rename it. Opening a file is recorded in the audit trail. Files can't be added once the incident is closed.</p>
+<h3 id="sec-corrective-actions">Corrective actions</h3>
+<ol>
+<li>In the incident, enter the action, choose an <strong>Owner</strong> and a <strong>Due date</strong>, and click <strong>Add action</strong>.</li>
+<li>Move it through <strong>Open → In progress → Done</strong> as work progresses.</li>
+<li>The <strong>Corrective Actions</strong> page shows overdue actions across all incidents; click <strong>Show all open actions</strong> to see the rest. Overdue actions also appear on the Dashboard and in the weekly summary.</li>
+</ol>
+<h3 id="sec-safety-alerts">Safety alerts</h3>
+<p>Use a safety alert when every manager needs to know something learned from an incident.</p>
+<ol>
+<li>In the incident, click <strong>Raise a safety alert from this incident</strong>, give it a title and message, and save.</li>
+<li>Everyone sees it on the <strong>Safety Alerts</strong> page and clicks to acknowledge they've read it.</li>
+<li>Click <strong>Who's seen it?</strong> to see who has and hasn't acknowledged. <strong>Archive</strong> an alert when it's no longer needed.</li>
+</ol>
+<h3 id="sec-the-audit-trail">The audit trail</h3>
+<p>Every incident keeps a permanent record, with names and times, of:</p>
+<ul>
+<li>who reported it and every change of status, severity and responsible manager;</li>
+<li>each harm level, candour, RIDDOR and CQC step;</li>
+<li>corrective actions and safety alerts;</li>
+<li>every Word export;</li>
+<li><strong>every staff member who opened the incident</strong>, and every photo or statement opened.</li>
+</ul>
+<p>An <strong>Opened by</strong> line above the trail summarises who has viewed the incident, how many times and when they last opened it. Repeat opens by the same person within 30 minutes count as one visit.</p>
+<h3 id="sec-exporting">Exporting</h3>
+<ul>
+<li><strong>Single incident</strong> — <strong>Download as Word (Investigation form)</strong> in an incident downloads a Word document (form QA4) with all details, the investigation, the regulatory record, photos and the audit trail. Each export is logged.</li>
+<li><strong>Summary report</strong> — <strong>Incident Reporting → Export summary</strong> downloads a Word summary for a date range, broken down by category, severity, status, vehicle and location, with overdue incidents and RIDDOR/CQC flags.</li>
+</ul>
+<hr />
+<h2 id="sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes and fleet</h2>
+<h3 id="sec-dashboard">Dashboard</h3>
+<p>At-a-glance figures: total, open and overdue incidents, this month's count, RIDDOR and CQC flags, overdue actions and unread safety alerts. Charts show incidents per week and by category, severity, status, response status, vehicle and location, plus a list of incidents with regulatory flags or outstanding actions.</p>
+<h3 id="sec-case-notes">Case notes</h3>
+<p>For ongoing matters that need a running record. Click <strong>+ New note</strong> to start one, then <strong>+ Add</strong> to add dated entries. Each entry records who wrote it.</p>
+<h3 id="sec-fleet-management">Fleet management</h3>
+<p><strong>Fleet Management</strong> has three tabs:</p>
+<ul>
+<li><strong>Vehicles</strong> — registration, call sign, type, status (Available, Off road, Maintenance) and due dates for <strong>MOT, service, insurance and tax</strong>. Dates turn amber within 30 days and red when overdue. Use <strong>+ Add vehicle</strong> to add one.</li>
+<li><strong>Daily checks</strong> — every vehicle daily inspection, with who checked it, mileage and the result.</li>
+<li><strong>Defects</strong> — problems found in checks or added by managers. Click <strong>Resolve</strong> with a note when fixed, or <strong>Reopen</strong> if needed.</li>
+</ul>
+<p><strong>Print QR codes</strong> prints one code per vehicle, plus a general one.</p>
+<h3 id="sec-vehicle-daily-inspection-crew">Vehicle daily inspection (crew)</h3>
+<p>At the start of every shift, crew scan the vehicle's QR code (no login):</p>
+<ol>
+<li>Check the vehicle and your name. Enter the mileage.</li>
+<li>Answer every item <strong>OK</strong> or <strong>Problem</strong> — exterior, mechanical, and cab and saloon (including oxygen, defibrillator and drug bags).</li>
+<li>For any problem, describe it. Each problem becomes a defect and managers are emailed.</li>
+<li>Submit.</li>
+</ol>
+<hr />
+<h2 id="sec-10-admin-tasks">10. Admin tasks</h2>
+<h3 id="sec-staff-accounts">Staff accounts</h3>
+<p>On the <strong>Staff</strong> page, admins and managers can <strong>+ Add staff</strong>, change a person's name, phone and role (Manager or Admin), and deactivate leavers. Deactivating an account signs the person out immediately.</p>
+<h3 id="sec-settings">Settings</h3>
+<ul>
+<li><strong>User guide</strong> — opens this guide.</li>
+<li><strong>My details</strong> and <strong>Change password</strong> — for everyone.</li>
+<li><strong>Password reset</strong> — select staff and generate temporary passwords. Give each person their temporary password securely and ask them to change it after signing in.</li>
+<li><strong>Incident response SLA</strong> — days to respond (1–5), hours to allocate a manager, and the duty of candour target.</li>
+<li><strong>Weekly summary email</strong> — click <strong>Send weekly digest now</strong> to email the summary of open, overdue and regulatory items to all managers and admins.</li>
+</ul>
+<h3 id="sec-emails-dynamo-sends">Emails Dynamo sends</h3>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>Email</th>
+<th>Sent to</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Report received</td>
+<td>The reporter</td>
+<td>When a QR report with an email is submitted</td>
+</tr>
+<tr>
+<td>URGENT: incident reported via QR form</td>
+<td>Managers and admins</td>
+<td>Reporter said someone was hurt, or Safeguarding / Violence</td>
+</tr>
+<tr>
+<td>HIGH/CRITICAL severity incident</td>
+<td>Managers and admins</td>
+<td>Logged at, or raised to, HIGH or CRITICAL</td>
+</tr>
+<tr>
+<td>ESCALATION: response overdue</td>
+<td>Managers and admins</td>
+<td>24 hours after the response deadline passes</td>
+</tr>
+<tr>
+<td>Regulatory deadlines need action</td>
+<td>Managers and admins</td>
+<td>Candour, RIDDOR or CQC due soon or overdue, or candour decision needed</td>
+</tr>
+<tr>
+<td>Vehicle defect reported</td>
+<td>Managers and admins</td>
+<td>A daily check finds a problem</td>
+</tr>
+<tr>
+<td>Weekly summary</td>
+<td>Managers and admins</td>
+<td>When sent from Settings</td>
+</tr>
+</tbody>
+</table></div>
+<p>Alert emails never include the incident description, because it may contain patient information. Open the incident in Dynamo to read it. If emails aren't arriving, ask an admin to check that email sending is set up.</p>
+<h3 id="sec-data-protection-admins">Data protection (admins)</h3>
+<p>The <strong>Data protection tools</strong> page (<code>/gdpr</code>) lets admins:</p>
+<ul>
+<li>find everything held about a person and download a subject access export (check and redact it before sending);</li>
+<li>anonymise a person following an erasure request;</li>
+<li>set retention periods, preview and run retention;</li>
+<li>view the log of every data protection action.</li>
+</ul>
+<p>The <strong>Privacy notice</strong> (<code>/privacy</code>) explains to staff and the public what Dynamo holds and why.</p>
+<hr />
+<h2 id="sec-11-quick-reference">11. Quick reference</h2>
+<h3 id="sec-all-deadlines">All deadlines</h3>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>What</th>
+<th>Deadline</th>
+<th>Starts</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Allocate a manager</td>
+<td>24 hours (adjustable)</td>
+<td>Report received</td>
+</tr>
+<tr>
+<td>Respond to incident</td>
+<td>5 days (adjustable)</td>
+<td>Date of incident</td>
+</tr>
+<tr>
+<td>Duty of candour steps</td>
+<td>As soon as reasonably practicable; target 10 days (adjustable)</td>
+<td>Candour decision</td>
+</tr>
+<tr>
+<td>RIDDOR — death, specified injury</td>
+<td>Without delay; report within 10 days</td>
+<td>Date of incident</td>
+</tr>
+<tr>
+<td>RIDDOR — over-7-day injury</td>
+<td>15 days</td>
+<td>Date of incident</td>
+</tr>
+<tr>
+<td>RIDDOR — non-worker to hospital, dangerous occurrence</td>
+<td>10 days</td>
+<td>Date of incident</td>
+</tr>
+<tr>
+<td>CQC notification</td>
+<td>Without delay (Dynamo: overdue after 24 hours)</td>
+<td>Flagged in Dynamo</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="sec-frequently-asked-questions">Frequently asked questions</h3>
+<p><strong>Why can't I close an incident?</strong>
+Set the status to Closed and read the checklist that appears. Everything listed must be done first.</p>
+<p><strong>Can I reopen a closed incident?</strong>
+No. Log a new incident and link it with <em>Related / duplicate incident</em>.</p>
+<p><strong>I've forgotten my password.</strong>
+Ask an admin to issue a temporary password from Settings → Password reset.</p>
+<p><strong>The incident says "Candour: decide". What do I do?</strong>
+The harm level is moderate or worse. Decide whether it's a notifiable safety incident (section 5) and save.</p>
+<p><strong>Who can see that I opened an incident?</strong>
+Anyone who can open the incident can see the audit trail, including the <em>Opened by</em> list.</p>
+<p><strong>A crew member reported something serious through the QR form but it shows as LOW.</strong>
+QR reports always start as LOW. Review it, set the severity and harm level, and allocate a manager.</p><a class="top" href="#sec-1-introduction">Back to top ↑</a></main>
+</div>
+<script>
+(function(){
+  var links=[].slice.call(document.querySelectorAll('nav a'));
+  var secs=links.map(function(a){return document.getElementById(a.getAttribute('href').slice(1));});
+  function upd(){ var y=window.scrollY+80, cur=0; secs.forEach(function(s,i){ if(s && s.offsetTop<=y) cur=i; });
+    links.forEach(function(a,i){ a.classList.toggle('on', i===cur); }); }
+  window.addEventListener('scroll',upd,{passive:true}); upd();
+})();
+</script>
+</body></html>

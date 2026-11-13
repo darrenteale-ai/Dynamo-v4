@@ -445,6 +445,9 @@ const INDEX_HTML_GZ_B64 = FRONTEND_FROM_FILE ? "" : loadFrontendGzB64();
     `INDEX_HTML_GZ_B64 loaded: length=${INDEX_HTML_GZ_B64.length} sha256=${hasher.digest("hex")}`
   );
 }
+// User guide (guide.html in the repo), opened from Settings → User guide.
+const GUIDE_FILE = `${import.meta.dir}/guide.html`;
+const GUIDE_HTML: string | null = (await Bun.file(GUIDE_FILE).exists()) ? await Bun.file(GUIDE_FILE).text() : null;
 const INDEX_HTML_RAW = FRONTEND_FROM_FILE ?? new TextDecoder("utf-8").decode(Bun.gunzipSync(Buffer.from(INDEX_HTML_GZ_B64, "base64")));
 
 async function ensureSchema() {
@@ -3495,6 +3498,10 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
 
     if (path === "/api/health") return json({ ok: true });
 
+    if (path === "/guide" && method === "GET") {
+      if (!GUIDE_HTML) return new Response("User guide not found", { status: 404 });
+      return new Response(GUIDE_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
     if (path === "/privacy" && method === "GET") {
       return new Response(await renderPrivacyPage(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }

@@ -2554,6 +2554,17 @@ function Settings() {
         <h1>Settings</h1>
       </div>
 
+      <div className="card" style={{ maxWidth: 560, marginBottom: 20 }}>
+        <div className="settings-section-title">User guide</div>
+        <p className="muted" style={{ marginTop: -4, marginBottom: 12 }}>
+          How to report and manage incidents, record duty of candour, RIDDOR and CQC steps, close incidents,
+          and use fleet, staff and admin tools. Includes a quick reference of every deadline.
+        </p>
+        <a className="btn btn-primary" href="/guide" target="_blank" rel="noopener" style={{ textDecoration: 'none', display: 'inline-block' }}>
+          Open user guide
+        </a>
+      </div>
+
       <div className="card" style={{ maxWidth: 560 }}>
         <form onSubmit={handleSubmit}>
           {error && <div className="error-banner">{error}</div>}
