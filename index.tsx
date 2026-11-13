@@ -175,12 +175,14 @@ async function sendIncidentAckEmail(toEmail: string, ref: string, occurredAt: st
 // sendIncidentAckEmail, this never throws — a misconfigured/unavailable
 // email provider must never block an incident being saved or the incidents
 // list from loading.
-async function sendAlertEmail(toEmails: string[], subject: string, text: string, html: string) {
+// Returns true only if the email provider accepted the message, so callers
+// that record "alert sent" can retry later when email wasn't available.
+async function sendAlertEmail(toEmails: string[], subject: string, text: string, html: string): Promise<boolean> {
   const recipients = toEmails.filter(Boolean);
-  if (recipients.length === 0) return;
+  if (recipients.length === 0) return false;
   if (!RESEND_API_KEY) {
     console.log(`Skipping alert email "${subject}" to ${recipients.join(", ")}: RESEND_API_KEY not set`);
-    return;
+    return false;
   }
   try {
     const res = await fetch("https://api.resend.com/emails", {
@@ -199,9 +201,12 @@ async function sendAlertEmail(toEmails: string[], subject: string, text: string,
     });
     if (!res.ok) {
       console.log(`Alert email "${subject}" to ${recipients.join(", ")} failed: ${res.status} ${await res.text()}`);
+      return false;
     }
+    return true;
   } catch (err) {
     console.log(`Alert email "${subject}" to ${recipients.join(", ")} threw: ${err}`);
+    return false;
   }
 }
 
@@ -235,10 +240,32 @@ async function notifyHighSeverityIncident(ref: string, category: string | null, 
   );
 }
 
+// Sent for QR-form reports where the reporter said someone was hurt or it is
+// a safeguarding concern, or the category is safeguarding / violence. The
+// public form can't set severity (no login), so this is how a serious report
+// reaches managers immediately.
+async function notifyUrgentPublicReport(ref: string, category: string | null, location: string | null, reasons: string[]) {
+  const emails = await getMgrAndAdminEmails();
+  const cat = category ? CATEGORY_LABEL_MAP[category] || category : "Not specified";
+  return await sendAlertEmail(
+    emails,
+    `URGENT: incident reported via QR form — ${ref}`,
+    `An incident has been reported through the QR form that needs prompt review.\n\n` +
+      `Reference: ${ref}\nCategory: ${cat}\nLocation: ${location || "Not specified"}\n` +
+      `Why this was flagged: ${reasons.join("; ")}\n\n` +
+      `Open the incident in Dynamo to read the full report, set the severity and harm level, and allocate a manager.`,
+    `<p>An incident has been reported through the QR form that needs prompt review.</p>` +
+      `<p><strong>Reference:</strong> ${escapeHtml(ref)}<br/><strong>Category:</strong> ${escapeHtml(cat)}<br/>` +
+      `<strong>Location:</strong> ${escapeHtml(location || "Not specified")}<br/>` +
+      `<strong>Why this was flagged:</strong> ${escapeHtml(reasons.join("; "))}</p>` +
+      `<p>Open the incident in Dynamo to read the full report, set the severity and harm level, and allocate a manager.</p>`
+  );
+}
+
 async function notifyBreachedIncident(ref: string, category: string | null, hoursOverdue: number) {
   const emails = await getMgrAndAdminEmails();
   const daysOverdue = Math.floor(hoursOverdue / 24);
-  await sendAlertEmail(
+  return await sendAlertEmail(
     emails,
     `ESCALATION: response overdue — ${ref}`,
     `Incident ${ref} has missed its response deadline by more than ${ESCALATION_BREACH_HOURS} hours ` +
@@ -265,6 +292,12 @@ async function runDigest(): Promise<{ recipientCount: number; emailSent: boolean
   const overdueIncidents = incidents.filter((i) => i.responseStatus === "RED");
   const riddor = incidents.filter((i) => i.riddorReportable && i.status !== "CLOSED");
   const cqc = incidents.filter((i) => i.cqcNotifiable && i.status !== "CLOSED");
+  const openInc = incidents.filter((i) => i.status !== "CLOSED");
+  const riddorOverdue = openInc.filter((i) => i.compliance.riddor?.state === "RED");
+  const cqcOutstanding = openInc.filter((i) => i.compliance.cqc && i.compliance.cqc.state !== "DONE");
+  const candourOutstanding = openInc.filter((i) =>
+    ["DECISION_NEEDED", "RED", "AMBER", "GREEN", "AWAITING_FINDINGS"].includes(i.compliance.candour?.state)
+  );
   const weekAgo = new Date(Date.now() - 7 * 86400000);
   const newThisWeek = incidents.filter((i) => new Date(i.createdAt) >= weekAgo);
 
@@ -285,6 +318,9 @@ async function runDigest(): Promise<{ recipientCount: number; emailSent: boolean
     `Overdue response: ${overdueIncidents.length}`,
     `RIDDOR reportable (open): ${riddor.length}`,
     `CQC notifiable (open): ${cqc.length}`,
+    `RIDDOR reports overdue: ${riddorOverdue.length}`,
+    `CQC notifications not yet sent: ${cqcOutstanding.length}`,
+    `Duty of candour outstanding: ${candourOutstanding.length}`,
     `Overdue corrective actions: ${overdueActions.length}`,
     `Active safety alerts: ${unackedAlerts}`,
   ];
@@ -297,6 +333,9 @@ async function runDigest(): Promise<{ recipientCount: number; emailSent: boolean
     listBlock("Overdue incidents", overdueIncidents) +
     listBlock("RIDDOR reportable", riddor) +
     listBlock("CQC notifiable", cqc) +
+    listBlock("RIDDOR reports overdue", riddorOverdue) +
+    listBlock("CQC notifications not yet sent", cqcOutstanding) +
+    listBlock("Duty of candour outstanding", candourOutstanding) +
     (overdueActions.length
       ? `\nOverdue corrective actions:\n` + (overdueActions as any[]).map((a) => `  - ${a.incident_ref}: ${a.description}`).join("\n")
       : "") +
@@ -333,8 +372,11 @@ async function escalateBreachedIncidents() {
     const hoursLeft = hoursUntilDeadline(row.occurred_at, daysToRespond);
     const hoursOverdue = -hoursLeft;
     if (hoursOverdue >= ESCALATION_BREACH_HOURS) {
-      await notifyBreachedIncident(row.ref, row.category, hoursOverdue);
-      await sql`UPDATE incidents SET escalated_at = now() WHERE id = ${row.id}`;
+      // Only mark as escalated once the email has actually gone, so an
+      // unavailable email provider doesn't silently swallow escalations.
+      if (await notifyBreachedIncident(row.ref, row.category, hoursOverdue)) {
+        await sql`UPDATE incidents SET escalated_at = now() WHERE id = ${row.id}`;
+      }
     }
   }
 }
@@ -500,6 +542,45 @@ async function ensureSchema() {
   await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS likelihood TEXT`;
   await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS impact TEXT`;
 
+  // ---- Regulatory compliance (duty of candour, RIDDOR, CQC) ----
+  // Answer to "Was anyone hurt, or is this a safeguarding concern?" on the
+  // public QR form. Not trusted as a severity (no login) but it does alert
+  // managers straight away.
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS harm_reported BOOLEAN`;
+  // Duty of candour (Regulation 20). harm_level uses the regulation's own
+  // scale, kept separate from the LOW–CRITICAL risk severity.
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS harm_level TEXT`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS doc_notifiable TEXT`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS doc_decided_by TEXT`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS doc_decided_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS doc_verbal_at DATE`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS doc_apology BOOLEAN NOT NULL DEFAULT FALSE`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS doc_written_at DATE`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS doc_findings_shared_at DATE`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS doc_notes TEXT`;
+  // RIDDOR: type sets the deadline (10 days, or 15 for over-7-day injuries).
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS riddor_type TEXT`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS riddor_submitted_at DATE`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS riddor_hse_ref TEXT`;
+  // CQC statutory notification ("without delay"): clock starts when flagged.
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS cqc_type TEXT`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS cqc_flagged_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS cqc_submitted_at DATE`;
+  await sql`ALTER TABLE incidents ADD COLUMN IF NOT EXISTS cqc_ref TEXT`;
+  await sql`UPDATE incidents SET cqc_flagged_at = created_at WHERE cqc_notifiable = TRUE AND cqc_flagged_at IS NULL`;
+  // One row per deadline alert sent, so each "due soon" / "overdue" email
+  // goes out once per incident.
+  await sql`
+    CREATE TABLE IF NOT EXISTS incident_deadline_alerts (
+      id SERIAL PRIMARY KEY,
+      incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (incident_id, kind, stage)
+    )
+  `;
+
   await sql`
     CREATE TABLE IF NOT EXISTS incident_audit_log (
       id SERIAL PRIMARY KEY,
@@ -565,6 +646,7 @@ async function ensureSchema() {
     )
   `;
   await sql`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS hours_to_allocate INTEGER NOT NULL DEFAULT 24`;
+  await sql`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS candour_target_days INTEGER NOT NULL DEFAULT 10`;
   await sql`
     CREATE TABLE IF NOT EXISTS case_notes (
       id SERIAL PRIMARY KEY,
@@ -848,6 +930,227 @@ function allocationStatus(createdAt: string, responsibleManagerId: number | null
 // an admin before we send an escalation email.
 const ESCALATION_BREACH_HOURS = 24;
 
+// =====================================================================
+// Regulatory compliance: duty of candour (CQC Regulation 20), RIDDOR and
+// CQC statutory notifications. Each has a deadline that Dynamo tracks,
+// alerts on, and checks before an incident can be closed.
+// =====================================================================
+
+// Regulation 20 harm scale. MODERATE and above (including prolonged
+// psychological harm and death) can make an incident a notifiable safety
+// incident, so a candour decision is required.
+const HARM_LEVELS = ["NONE", "LOW", "MODERATE", "SEVERE", "PROLONGED_PSYCHOLOGICAL", "DEATH"];
+const HARM_LABELS: Record<string, string> = {
+  NONE: "No harm",
+  LOW: "Low harm",
+  MODERATE: "Moderate harm",
+  SEVERE: "Severe harm",
+  PROLONGED_PSYCHOLOGICAL: "Prolonged psychological harm",
+  DEATH: "Death",
+};
+const CANDOUR_HARM = new Set(["MODERATE", "SEVERE", "PROLONGED_PSYCHOLOGICAL", "DEATH"]);
+
+// RIDDOR report types and their deadlines in days from the date of the
+// incident: 10 days, except over-7-day incapacitation (15 days).
+const RIDDOR_TYPES: Record<string, { label: string; days: number }> = {
+  DEATH: { label: "Work-related death", days: 10 },
+  SPECIFIED_INJURY: { label: "Specified injury to a worker", days: 10 },
+  OVER_7_DAY: { label: "Over-7-day incapacitation of a worker", days: 15 },
+  NON_WORKER_HOSPITAL: { label: "Non-worker taken to hospital for treatment", days: 10 },
+  DANGEROUS_OCCURRENCE: { label: "Dangerous occurrence", days: 10 },
+};
+
+// CQC statutory notifications must be sent "without delay"; Dynamo turns
+// amber after 12 hours and red after 24 hours from when it was flagged.
+const CQC_TYPES: Record<string, string> = {
+  DEATH: "Death of a person using the service",
+  SERIOUS_INJURY: "Serious injury",
+  ABUSE: "Abuse or allegation of abuse",
+  POLICE: "Incident reported to or investigated by the police",
+  SERVICE_DISRUPTION: "Event that stops or may stop the service running safely",
+  OTHER: "Other notification",
+};
+const CQC_TARGET_HOURS = 24;
+
+// Internal target (days from the candour decision) for telling the person
+// and sending the written follow-up. Regulation 20 says "as soon as
+// reasonably practicable"; admins can tighten this on the Settings page.
+let candourTargetDays = 10;
+async function loadCandourTarget() {
+  try {
+    const [row] = await sql`SELECT candour_target_days FROM app_settings WHERE id = 1`;
+    if (row?.candour_target_days) candourTargetDays = row.candour_target_days;
+  } catch {}
+}
+
+function dateOnlyMs(v: any): number | null {
+  if (!v) return null;
+  const d = v instanceof Date ? v : new Date(v);
+  return isNaN(d.getTime()) ? null : d.getTime();
+}
+
+// RED (overdue), AMBER (due within amberHours), GREEN, or DONE.
+function deadlineState(dueMs: number, done: boolean, amberHours: number): string {
+  if (done) return "DONE";
+  const hoursLeft = (dueMs - Date.now()) / 3600000;
+  if (hoursLeft < 0) return "RED";
+  if (hoursLeft <= amberHours) return "AMBER";
+  return "GREEN";
+}
+
+function computeCompliance(row: any) {
+  const harmTriggers = CANDOUR_HARM.has(row.harm_level);
+
+  // ---- Duty of candour ----
+  let candour: any = null;
+  if (row.doc_notifiable === "NO") {
+    candour = { state: "NOT_NOTIFIABLE" };
+  } else if (row.doc_notifiable === "YES") {
+    const missing: string[] = [];
+    if (!row.doc_verbal_at) missing.push("person told in person");
+    if (!row.doc_apology) missing.push("apology given");
+    if (!row.doc_written_at) missing.push("written follow-up sent");
+    const decidedMs = dateOnlyMs(row.doc_decided_at) ?? dateOnlyMs(row.created_at) ?? Date.now();
+    const dueMs = decidedMs + candourTargetDays * 86400000;
+    if (missing.length === 0) {
+      candour = { state: row.doc_findings_shared_at ? "DONE" : "AWAITING_FINDINGS", dueAt: new Date(dueMs).toISOString(), missing: [] };
+    } else {
+      candour = { state: deadlineState(dueMs, false, 48), dueAt: new Date(dueMs).toISOString(), missing };
+    }
+  } else if (harmTriggers) {
+    candour = { state: "DECISION_NEEDED" };
+  }
+
+  // ---- RIDDOR ----
+  let riddor: any = null;
+  if (row.riddor_reportable) {
+    const type = RIDDOR_TYPES[row.riddor_type];
+    const days = type ? type.days : 10; // unknown type: assume the shorter deadline
+    const occurredMs = dateOnlyMs(row.occurred_at) ?? Date.now();
+    const dueMs = occurredMs + days * 86400000;
+    riddor = {
+      state: deadlineState(dueMs, !!row.riddor_submitted_at, 72),
+      dueAt: new Date(dueMs).toISOString(),
+      days,
+      typeMissing: !type,
+    };
+  }
+
+  // ---- CQC notification ----
+  let cqc: any = null;
+  if (row.cqc_notifiable) {
+    const flaggedMs = dateOnlyMs(row.cqc_flagged_at) ?? dateOnlyMs(row.created_at) ?? Date.now();
+    const dueMs = flaggedMs + CQC_TARGET_HOURS * 3600000;
+    cqc = {
+      state: deadlineState(dueMs, !!row.cqc_submitted_at, 12),
+      dueAt: new Date(dueMs).toISOString(),
+      flaggedAt: new Date(flaggedMs).toISOString(),
+    };
+  }
+
+  // ---- What must be done before the incident can be closed ----
+  const closureBlockers: string[] = [];
+  if (!row.harm_level) closureBlockers.push("Record the harm level (choose “No harm” if nobody was harmed).");
+  if (harmTriggers && !row.doc_notifiable) {
+    closureBlockers.push("Duty of candour: decide whether this is a notifiable safety incident.");
+  }
+  if (row.doc_notifiable === "YES") {
+    if (!row.doc_verbal_at) closureBlockers.push("Duty of candour: record the date the person was told in person.");
+    if (!row.doc_apology) closureBlockers.push("Duty of candour: confirm an apology was given.");
+    if (!row.doc_written_at) closureBlockers.push("Duty of candour: record the date the written follow-up was sent.");
+    if (!row.doc_findings_shared_at) closureBlockers.push("Duty of candour: record the date the findings were shared.");
+  }
+  if (row.riddor_reportable) {
+    if (!RIDDOR_TYPES[row.riddor_type]) closureBlockers.push("RIDDOR: choose the report type.");
+    if (!row.riddor_submitted_at) closureBlockers.push("RIDDOR: record the date the report was submitted to HSE.");
+    if (!String(row.riddor_hse_ref || "").trim()) closureBlockers.push("RIDDOR: record the HSE reference number.");
+  }
+  if (row.cqc_notifiable) {
+    if (!CQC_TYPES[row.cqc_type]) closureBlockers.push("CQC: choose the notification type.");
+    if (!row.cqc_submitted_at) closureBlockers.push("CQC: record the date the notification was sent.");
+  }
+
+  return { candour, riddor, cqc, closureBlockers };
+}
+
+const COMPLIANCE_KIND_LABEL: Record<string, string> = {
+  CANDOUR: "Duty of candour",
+  RIDDOR: "RIDDOR report",
+  CQC: "CQC notification",
+};
+
+// Emails managers/admins about duty of candour, RIDDOR and CQC deadlines
+// that are due soon, overdue, or (for candour) waiting for a decision.
+// Each alert is recorded so it is sent once per incident and stage, and
+// only recorded when the email could actually be sent.
+let complianceSweepRunning = false;
+async function runComplianceSweep(): Promise<{ newAlerts: number; emailed: boolean }> {
+  if (complianceSweepRunning) return { newAlerts: 0, emailed: false };
+  complianceSweepRunning = true;
+  try {
+    const rows = (await sql`
+      SELECT * FROM incidents
+      WHERE status <> 'CLOSED' AND anonymised_at IS NULL
+        AND (riddor_reportable OR cqc_notifiable OR doc_notifiable = 'YES'
+             OR harm_level IN ('MODERATE', 'SEVERE', 'PROLONGED_PSYCHOLOGICAL', 'DEATH'))
+    `) as any[];
+    const pending: { incidentId: number; ref: string; kind: string; stage: string; text: string }[] = [];
+    for (const row of rows) {
+      const c = computeCompliance(row);
+      const fmt = (iso: string) => new Date(iso).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "Europe/London" });
+      const add = (kind: string, stage: string, text: string) => pending.push({ incidentId: row.id, ref: row.ref, kind, stage, text });
+      if (c.candour?.state === "DECISION_NEEDED") {
+        add("CANDOUR", "DECISION", `${HARM_LABELS[row.harm_level] || row.harm_level} recorded — decide whether this is a notifiable safety incident`);
+      } else if (c.candour?.state === "RED" || c.candour?.state === "AMBER") {
+        add("CANDOUR", c.candour.state === "RED" ? "OVERDUE" : "DUE_SOON",
+          `${c.candour.state === "RED" ? "Overdue" : "Due"} ${fmt(c.candour.dueAt)} — still to do: ${c.candour.missing.join(", ")}`);
+      }
+      if (c.riddor && (c.riddor.state === "RED" || c.riddor.state === "AMBER")) {
+        add("RIDDOR", c.riddor.state === "RED" ? "OVERDUE" : "DUE_SOON",
+          `${c.riddor.state === "RED" ? "Overdue — was due" : "Due"} ${fmt(c.riddor.dueAt)} (${c.riddor.days}-day deadline)`);
+      }
+      if (c.cqc && (c.cqc.state === "RED" || c.cqc.state === "AMBER")) {
+        add("CQC", c.cqc.state === "RED" ? "OVERDUE" : "DUE_SOON",
+          `${c.cqc.state === "RED" ? "Not sent within 24 hours of being flagged" : "Must be sent without delay"} (flagged ${fmt(c.cqc.flaggedAt)})`);
+      }
+    }
+    if (pending.length === 0) return { newAlerts: 0, emailed: false };
+
+    // Drop alerts already sent.
+    const sent = (await sql`
+      SELECT incident_id, kind, stage FROM incident_deadline_alerts
+      WHERE incident_id IN ${sql([...new Set(pending.map((p) => p.incidentId))])}
+    `) as any[];
+    const sentKeys = new Set(sent.map((s) => `${s.incident_id}|${s.kind}|${s.stage}`));
+    const fresh = pending.filter((p) => !sentKeys.has(`${p.incidentId}|${p.kind}|${p.stage}`));
+    if (fresh.length === 0) return { newAlerts: 0, emailed: false };
+
+    const emails = await getMgrAndAdminEmails();
+    const overdue = fresh.some((f) => f.stage === "OVERDUE");
+    const subject = `${overdue ? "OVERDUE: " : ""}Regulatory deadlines need action — ${fresh.length} item${fresh.length === 1 ? "" : "s"}`;
+    const text =
+      `The following duty of candour, RIDDOR or CQC items need action:\n\n` +
+      fresh.map((f) => `- ${f.ref} — ${COMPLIANCE_KIND_LABEL[f.kind]}: ${f.text}`).join("\n") +
+      `\n\nOpen each incident in Dynamo to record what has been done.`;
+    const html =
+      `<p>The following duty of candour, RIDDOR or CQC items need action:</p><ul>` +
+      fresh.map((f) => `<li><strong>${escapeHtml(f.ref)}</strong> — ${escapeHtml(COMPLIANCE_KIND_LABEL[f.kind])}: ${escapeHtml(f.text)}</li>`).join("") +
+      `</ul><p>Open each incident in Dynamo to record what has been done.</p>`;
+    const ok = await sendAlertEmail(emails, subject, text, html);
+    if (ok) {
+      for (const f of fresh) {
+        await sql`
+          INSERT INTO incident_deadline_alerts (incident_id, kind, stage) VALUES (${f.incidentId}, ${f.kind}, ${f.stage})
+          ON CONFLICT (incident_id, kind, stage) DO NOTHING
+        `;
+      }
+    }
+    return { newAlerts: fresh.length, emailed: ok };
+  } finally {
+    complianceSweepRunning = false;
+  }
+}
+
 function json(data: any, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 }
@@ -864,6 +1167,7 @@ const INCIDENT_CATEGORIES = [
 ];
 
 const INCIDENT_SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
+const INCIDENT_STATUSES = ["OPEN", "INVESTIGATING", "CLOSED"];
 
 const CATEGORY_LABEL_MAP: Record<string, string> = {
   CLINICAL: "Clinical",
@@ -941,6 +1245,24 @@ function serializeIncident(row: any, daysToRespond: number, hoursToAllocate: num
     cqcNotifiable: row.cqc_notifiable,
     relatedIncidentId: row.related_incident_id,
     relatedIncidentRef: row.related_incident_ref,
+    harmReported: row.harm_reported,
+    harmLevel: row.harm_level,
+    docNotifiable: row.doc_notifiable,
+    docDecidedBy: row.doc_decided_by,
+    docDecidedAt: row.doc_decided_at,
+    docVerbalAt: toDateStr(row.doc_verbal_at),
+    docApology: !!row.doc_apology,
+    docWrittenAt: toDateStr(row.doc_written_at),
+    docFindingsSharedAt: toDateStr(row.doc_findings_shared_at),
+    docNotes: row.doc_notes,
+    riddorType: row.riddor_type,
+    riddorSubmittedAt: toDateStr(row.riddor_submitted_at),
+    riddorHseRef: row.riddor_hse_ref,
+    cqcType: row.cqc_type,
+    cqcFlaggedAt: row.cqc_flagged_at,
+    cqcSubmittedAt: toDateStr(row.cqc_submitted_at),
+    cqcRef: row.cqc_ref,
+    compliance: computeCompliance(row),
   };
 }
 
@@ -1158,6 +1480,54 @@ function docPhotosSection(photos: EmbeddablePhoto[], skippedCount: number) {
   return blocks;
 }
 
+// Duty of candour, RIDDOR and CQC record for the exported report — the
+// evidence an inspector asks for.
+function docRegulatorySection(incident: any) {
+  const yesNo = (v: any) => (v ? "Yes" : "No");
+  const rows = [
+    docLabelRow("Harm level:", HARM_LABELS[incident.harmLevel] || "Not recorded"),
+    docLabelRow("Reporter said someone was hurt / safeguarding:",
+      incident.harmReported === true ? "Yes" : incident.harmReported === false ? "No" : "Not asked"),
+    docLabelRow("Notifiable safety incident (duty of candour):",
+      incident.docNotifiable === "YES" ? "Yes" : incident.docNotifiable === "NO" ? "No" : "Not decided"),
+  ];
+  if (incident.docNotifiable) {
+    rows.push(docLabelRow("Decision recorded by:",
+      `${incident.docDecidedBy || ""}${incident.docDecidedAt ? " on " + fmtDocDate(incident.docDecidedAt) : ""}`));
+  }
+  if (incident.docNotifiable === "YES") {
+    rows.push(
+      docLabelRow("Person told in person:", fmtDocDate(incident.docVerbalAt)),
+      docLabelRow("Apology given:", yesNo(incident.docApology)),
+      docLabelRow("Written follow-up sent:", fmtDocDate(incident.docWrittenAt)),
+      docLabelRow("Findings shared:", fmtDocDate(incident.docFindingsSharedAt)),
+    );
+  }
+  if (incident.docNotes) rows.push(docLabelRow("Candour notes:", incident.docNotes));
+  rows.push(docLabelRow("RIDDOR reportable:", yesNo(incident.riddorReportable)));
+  if (incident.riddorReportable) {
+    rows.push(
+      docLabelRow("RIDDOR type:", RIDDOR_TYPES[incident.riddorType]?.label || "Not recorded"),
+      docLabelRow("RIDDOR deadline:", incident.compliance?.riddor?.dueAt ? fmtDocDate(incident.compliance.riddor.dueAt) : ""),
+      docLabelRow("Submitted to HSE:", fmtDocDate(incident.riddorSubmittedAt)),
+      docLabelRow("HSE reference:", incident.riddorHseRef || ""),
+    );
+  }
+  rows.push(docLabelRow("CQC notifiable:", yesNo(incident.cqcNotifiable)));
+  if (incident.cqcNotifiable) {
+    rows.push(
+      docLabelRow("CQC notification type:", CQC_TYPES[incident.cqcType] || "Not recorded"),
+      docLabelRow("Flagged:", incident.cqcFlaggedAt ? fmtDocDateTime(incident.cqcFlaggedAt) : ""),
+      docLabelRow("Notification sent:", fmtDocDate(incident.cqcSubmittedAt)),
+      docLabelRow("CQC reference:", incident.cqcRef || ""),
+    );
+  }
+  return [
+    new Paragraph({ text: "Regulatory reporting", heading: HeadingLevel.HEADING_2, spacing: { before: 240, after: 120 } }),
+    new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }),
+  ];
+}
+
 async function buildIncidentDocx(incident: any, photos: EmbeddablePhoto[] = [], skippedPhotoCount = 0) {
   const generatedAt = fmtDocDateTime(new Date());
   const doc = new Document({
@@ -1241,6 +1611,8 @@ async function buildIncidentDocx(incident: any, photos: EmbeddablePhoto[] = [], 
               docLabelRow("Date:", fmtDocDate(incident.signOffDate)),
             ],
           }),
+
+          ...docRegulatorySection(incident),
 
           ...docPhotosSection(photos, skippedPhotoCount),
 
@@ -1742,7 +2114,7 @@ async function findSubjectIncidents(subject: { user: any; email: string | null; 
       (i.people_involved ILIKE ${like}) AS m_people_involved,
       (i.investigator_name ILIKE ${like} OR i.signature_name ILIKE ${like} OR i.on_call_manager_name ILIKE ${like}) AS m_named_role,
       (i.description ILIKE ${like} OR i.admin_notes ILIKE ${like} OR i.outcome ILIKE ${like}
-        OR i.recommendations ILIKE ${like} OR i.lessons_learnt ILIKE ${like}) AS m_free_text
+        OR i.recommendations ILIKE ${like} OR i.lessons_learnt ILIKE ${like} OR i.doc_notes ILIKE ${like}) AS m_free_text
     FROM incidents i
     WHERE i.reported_by = ${userId}
        OR i.responsible_manager_id = ${userId}
@@ -1758,6 +2130,8 @@ async function findSubjectIncidents(subject: { user: any; email: string | null; 
        OR i.outcome ILIKE ${like}
        OR i.recommendations ILIKE ${like}
        OR i.lessons_learnt ILIKE ${like}
+       OR i.doc_notes ILIKE ${like}
+       OR i.doc_decided_by ILIKE ${like}
     ORDER BY i.occurred_at ASC
   `;
 }
@@ -1913,9 +2287,11 @@ async function anonymiseSubject(
         people_involved = regexp_replace(people_involved, ${rx}, ${label}, 'gi'),
         investigator_name = regexp_replace(investigator_name, ${rx}, ${label}, 'gi'),
         signature_name = regexp_replace(signature_name, ${rx}, ${label}, 'gi'),
-        on_call_manager_name = regexp_replace(on_call_manager_name, ${rx}, ${label}, 'gi')
+        on_call_manager_name = regexp_replace(on_call_manager_name, ${rx}, ${label}, 'gi'),
+        doc_decided_by = regexp_replace(doc_decided_by, ${rx}, ${label}, 'gi')
       WHERE notified_by ~* ${rx} OR crew_names ~* ${rx} OR people_involved ~* ${rx}
          OR investigator_name ~* ${rx} OR signature_name ~* ${rx} OR on_call_manager_name ~* ${rx}
+         OR doc_decided_by ~* ${rx}
       RETURNING id
     `;
     summary.incidentsNameFieldsAnonymised = rows.length;
@@ -1970,7 +2346,7 @@ async function anonymiseSubject(
     ? ((await sql`
         SELECT ref FROM incidents
         WHERE description ~* ${rx} OR admin_notes ~* ${rx} OR outcome ~* ${rx}
-           OR recommendations ~* ${rx} OR lessons_learnt ~* ${rx}
+           OR recommendations ~* ${rx} OR lessons_learnt ~* ${rx} OR doc_notes ~* ${rx}
       `) as any[]).map((r) => r.ref)
     : [];
   const caseNoteHits = rx
@@ -2083,7 +2459,7 @@ async function runRetention(auth: any) {
         people_involved = NULL, crew_names = NULL, notified_by = NULL, reporter_email = NULL,
         location = NULL, admin_notes = NULL, outcome = NULL,
         investigator_name = NULL, signature_name = NULL, designation = NULL,
-        on_call_manager_name = NULL, cad_ref = NULL,
+        on_call_manager_name = NULL, cad_ref = NULL, doc_notes = NULL, doc_decided_by = NULL,
         reported_by = NULL, responsible_manager_id = NULL,
         anonymised_at = now()
       WHERE id = ${inc.id}
@@ -3018,6 +3394,25 @@ async function handleFleetRequest(req: Request, url: URL, path: string, method: 
 
 await ensureSchema();
 await seed();
+await loadCandourTarget();
+
+// Background sweep every 15 minutes: overdue-response escalations,
+// regulatory deadline alerts and the daily retention run. Previously these
+// only ran when someone opened the incident list.
+async function runScheduledSweep() {
+  const out: any = { at: new Date().toISOString() };
+  try { await escalateBreachedIncidents(); out.escalation = "ok"; } catch (err) { out.escalation = String(err); }
+  try { out.compliance = await runComplianceSweep(); } catch (err) { out.compliance = String(err); }
+  try { await maybeRunRetention(); out.retention = "ok"; } catch (err) { out.retention = String(err); }
+  return out;
+}
+const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
+setInterval(() => {
+  runScheduledSweep().then((r) => {
+    if (typeof r.escalation === "string" && r.escalation !== "ok") console.log(`Sweep escalation error: ${r.escalation}`);
+    if (typeof r.compliance === "string") console.log(`Sweep compliance error: ${r.compliance}`);
+  });
+}, SWEEP_INTERVAL_MS);
 
 Bun.serve({
   port: Number(Bun.env.PORT) || 8080,
@@ -3258,6 +3653,7 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       if (isMgrOrAdmin(auth)) {
         // Fire-and-forget: never blocks the list from loading.
         escalateBreachedIncidents().catch((err) => console.log(`Escalation sweep failed: ${err}`));
+        runComplianceSweep().catch((err) => console.log(`Compliance sweep failed: ${err}`));
         maybeRunRetention().catch((err) => console.log(`Retention run failed: ${err}`));
       }
       const rows =
@@ -3307,6 +3703,9 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         if (typeof body.onCallManagerInformed === "string") {
           body.onCallManagerInformed = body.onCallManagerInformed === "true";
         }
+        if (typeof body.harmReported === "string") {
+          body.harmReported = body.harmReported === "true" ? true : body.harmReported === "false" ? false : null;
+        }
         photoFiles = form.getAll("photos").filter((v): v is File => typeof v !== "string" && v.size > 0);
         const MAX_PHOTOS = 6;
         const MAX_PHOTO_SIZE = 20 * 1024 * 1024;
@@ -3339,17 +3738,19 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       // email even if one was somehow submitted.
       const isAnonymous = category === "NEAR_MISS" && body.anonymous === true;
       const reporterEmail = isAnonymous ? null : body.reporterEmail || null;
+      const harmReported = body.harmReported === true ? true : body.harmReported === false ? false : null;
       const [row] = await sql`
         INSERT INTO incidents (
           ref, reported_by, occurred_at, location, severity, category, description, status,
           cad_ref, call_sign, crew_names, notified_by, vehicle_reg, reporter_email,
-          on_call_manager_informed, on_call_manager_name, on_call_manager_called_at, is_anonymous
+          on_call_manager_informed, on_call_manager_name, on_call_manager_called_at, is_anonymous, harm_reported
         )
         VALUES (
           ${ref}, NULL, ${body.occurredAt}, ${body.location || null}, ${severity}, ${category}, ${body.description}, 'OPEN',
           ${body.cadRef || null}, ${body.callSign || null}, ${body.crewNames || null}, ${body.notifiedBy || null},
           ${body.vehicleReg || null}, ${reporterEmail},
-          ${body.onCallManagerInformed === true}, ${body.onCallManagerName || null}, ${body.onCallManagerCalledAt || null}, ${isAnonymous}
+          ${body.onCallManagerInformed === true}, ${body.onCallManagerName || null}, ${body.onCallManagerCalledAt || null}, ${isAnonymous},
+          ${harmReported}
         )
         RETURNING id
       `;
@@ -3381,6 +3782,19 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       if (reporterEmail) {
         // Don't block the response on the email provider; log any failure.
         sendIncidentAckEmail(reporterEmail, ref, body.occurredAt);
+      }
+      // Alert managers straight away about serious QR reports (severity
+      // stays LOW until a manager reviews it, so it can't trigger the usual
+      // high-severity alert).
+      const urgentReasons: string[] = [];
+      if (harmReported) urgentReasons.push("reporter said someone was hurt or it is a safeguarding concern");
+      if (category === "SAFEGUARDING") urgentReasons.push("category is Safeguarding");
+      if (category === "VIOLENCE") urgentReasons.push("category is Violence");
+      if (urgentReasons.length) {
+        await logIncidentAudit(row.id, null, "URGENT_FLAG", `Flagged for urgent review: ${urgentReasons.join("; ")}`);
+        notifyUrgentPublicReport(ref, category, body.location || null, urgentReasons).catch((err) =>
+          console.log(`Urgent report notify failed for ${ref}: ${err}`)
+        );
       }
       const daysToRespond = await getDaysToRespond();
       const hoursToAllocate = await getHoursToAllocate();
@@ -3479,9 +3893,56 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         return json({ error: "An incident cannot be related to itself" }, 400);
       }
       const severity = INCIDENT_SEVERITIES.includes(body.severity) ? body.severity : before.severity;
+
+      // ---- Regulatory fields (duty of candour, RIDDOR, CQC) ----
+      // Fields not sent by the client keep their current value, so older
+      // clients can't wipe them.
+      const has = (k: string) => Object.prototype.hasOwnProperty.call(body, k);
+      const pickDate = (k: string, current: any) => (has(k) ? cleanDate(body[k]) : toDateStr(current));
+      const pickText = (k: string, current: any, max: number) => (has(k) ? cleanText(body[k], max) : current);
+      const reg: any = {
+        harm_level: has("harmLevel") ? (HARM_LEVELS.includes(body.harmLevel) ? body.harmLevel : null) : before.harm_level,
+        doc_notifiable: has("docNotifiable") ? (["YES", "NO"].includes(body.docNotifiable) ? body.docNotifiable : null) : before.doc_notifiable,
+        doc_verbal_at: pickDate("docVerbalAt", before.doc_verbal_at),
+        doc_apology: has("docApology") ? body.docApology === true : !!before.doc_apology,
+        doc_written_at: pickDate("docWrittenAt", before.doc_written_at),
+        doc_findings_shared_at: pickDate("docFindingsSharedAt", before.doc_findings_shared_at),
+        doc_notes: pickText("docNotes", before.doc_notes, 4000),
+        riddor_reportable: has("riddorReportable") ? body.riddorReportable === true : !!before.riddor_reportable,
+        riddor_type: has("riddorType") ? (RIDDOR_TYPES[body.riddorType] ? body.riddorType : null) : before.riddor_type,
+        riddor_submitted_at: pickDate("riddorSubmittedAt", before.riddor_submitted_at),
+        riddor_hse_ref: pickText("riddorHseRef", before.riddor_hse_ref, 80),
+        cqc_notifiable: has("cqcNotifiable") ? body.cqcNotifiable === true : !!before.cqc_notifiable,
+        cqc_type: has("cqcType") ? (CQC_TYPES[body.cqcType] ? body.cqcType : null) : before.cqc_type,
+        cqc_submitted_at: pickDate("cqcSubmittedAt", before.cqc_submitted_at),
+        cqc_ref: pickText("cqcRef", before.cqc_ref, 80),
+      };
+      const docDecisionChanged = (before.doc_notifiable || null) !== (reg.doc_notifiable || null);
+      reg.doc_decided_by = docDecisionChanged ? (reg.doc_notifiable ? auth.name : null) : before.doc_decided_by;
+      reg.doc_decided_at = docDecisionChanged ? (reg.doc_notifiable ? new Date().toISOString() : null) : before.doc_decided_at;
+      reg.cqc_flagged_at = reg.cqc_notifiable ? before.cqc_flagged_at || new Date().toISOString() : null;
+      // Clear the RIDDOR / CQC detail if the flag is removed.
+      if (!reg.riddor_reportable) { reg.riddor_type = null; reg.riddor_submitted_at = null; reg.riddor_hse_ref = null; }
+      if (!reg.cqc_notifiable) { reg.cqc_type = null; reg.cqc_submitted_at = null; reg.cqc_ref = null; }
+      if (reg.doc_notifiable !== "YES") {
+        reg.doc_verbal_at = null; reg.doc_apology = false; reg.doc_written_at = null; reg.doc_findings_shared_at = null;
+      }
+
+      // Closing an incident: every regulatory step must be recorded first.
+      const newStatus = INCIDENT_STATUSES.includes(body.status) ? body.status : before.status;
+      if (newStatus === "CLOSED") {
+        const { closureBlockers } = computeCompliance({ ...before, ...reg });
+        if (closureBlockers.length) {
+          return json({
+            error: `This incident can't be closed yet:\n• ${closureBlockers.join("\n• ")}`,
+            closureBlockers,
+          }, 400);
+        }
+      }
+
       await sql`
         UPDATE incidents SET
-          status = ${body.status},
+          status = ${newStatus},
           severity = ${severity},
           likelihood = ${body.likelihood || null},
           impact = ${body.impact || null},
@@ -3504,9 +3965,25 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
           on_call_manager_informed = ${body.onCallManagerInformed === true},
           on_call_manager_name = ${body.onCallManagerName || null},
           on_call_manager_called_at = ${body.onCallManagerCalledAt || null},
-          riddor_reportable = ${body.riddorReportable === true},
-          cqc_notifiable = ${body.cqcNotifiable === true},
-          related_incident_id = ${body.relatedIncidentId || null}
+          riddor_reportable = ${reg.riddor_reportable},
+          cqc_notifiable = ${reg.cqc_notifiable},
+          related_incident_id = ${body.relatedIncidentId || null},
+          harm_level = ${reg.harm_level},
+          doc_notifiable = ${reg.doc_notifiable},
+          doc_decided_by = ${reg.doc_decided_by},
+          doc_decided_at = ${reg.doc_decided_at instanceof Date ? reg.doc_decided_at.toISOString() : reg.doc_decided_at},
+          doc_verbal_at = ${reg.doc_verbal_at},
+          doc_apology = ${reg.doc_apology},
+          doc_written_at = ${reg.doc_written_at},
+          doc_findings_shared_at = ${reg.doc_findings_shared_at},
+          doc_notes = ${reg.doc_notes},
+          riddor_type = ${reg.riddor_type},
+          riddor_submitted_at = ${reg.riddor_submitted_at},
+          riddor_hse_ref = ${reg.riddor_hse_ref},
+          cqc_type = ${reg.cqc_type},
+          cqc_flagged_at = ${reg.cqc_flagged_at instanceof Date ? reg.cqc_flagged_at.toISOString() : reg.cqc_flagged_at},
+          cqc_submitted_at = ${reg.cqc_submitted_at},
+          cqc_ref = ${reg.cqc_ref}
         WHERE id = ${id}
       `;
       const [full] = await sql`
@@ -3522,6 +3999,43 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       }
       if (before.severity !== full.severity) {
         await logIncidentAudit(id, auth, "SEVERITY_CHANGED", `${before.severity} → ${full.severity} (by ${auth.name})`);
+        // Raised to HIGH/CRITICAL after review (e.g. a QR report, which always
+        // starts as LOW): alert managers the same way as a new high-severity report.
+        const high = (v: string) => v === "HIGH" || v === "CRITICAL";
+        if (high(full.severity) && !high(before.severity)) {
+          notifyHighSeverityIncident(full.ref, full.category, full.location || null, "").catch((err) =>
+            console.log(`High-severity notify failed for ${full.ref}: ${err}`)
+          );
+        }
+      }
+      // Regulatory audit entries: one per change so the trail shows exactly
+      // when each candour / RIDDOR / CQC step was recorded and by whom.
+      const fmtD = (v: any) => (v ? fmtDocDate(v) : "cleared");
+      const regAudit: [string, boolean, string][] = [
+        ["HARM_LEVEL_SET", (before.harm_level || null) !== (full.harm_level || null),
+          `Harm level: ${HARM_LABELS[before.harm_level] || "not set"} → ${HARM_LABELS[full.harm_level] || "not set"}`],
+        ["CANDOUR_DECISION", docDecisionChanged,
+          full.doc_notifiable === "YES" ? "Recorded as a notifiable safety incident (duty of candour applies)"
+            : full.doc_notifiable === "NO" ? "Recorded as not a notifiable safety incident" : "Duty of candour decision cleared"],
+        ["CANDOUR_STEP", toDateStr(before.doc_verbal_at) !== toDateStr(full.doc_verbal_at), `Person told in person: ${fmtD(full.doc_verbal_at)}`],
+        ["CANDOUR_STEP", !!before.doc_apology !== !!full.doc_apology, full.doc_apology ? "Apology recorded as given" : "Apology record cleared"],
+        ["CANDOUR_STEP", toDateStr(before.doc_written_at) !== toDateStr(full.doc_written_at), `Written follow-up sent: ${fmtD(full.doc_written_at)}`],
+        ["CANDOUR_STEP", toDateStr(before.doc_findings_shared_at) !== toDateStr(full.doc_findings_shared_at), `Findings shared: ${fmtD(full.doc_findings_shared_at)}`],
+        ["RIDDOR_FLAG", !!before.riddor_reportable !== !!full.riddor_reportable,
+          full.riddor_reportable ? "Marked RIDDOR reportable" : "RIDDOR reportable flag removed"],
+        ["RIDDOR_FLAG", (before.riddor_type || null) !== (full.riddor_type || null) && !!full.riddor_type,
+          `RIDDOR type: ${RIDDOR_TYPES[full.riddor_type]?.label || full.riddor_type}`],
+        ["RIDDOR_SUBMITTED", toDateStr(before.riddor_submitted_at) !== toDateStr(full.riddor_submitted_at) || (before.riddor_hse_ref || null) !== (full.riddor_hse_ref || null),
+          `RIDDOR submitted: ${fmtD(full.riddor_submitted_at)}${full.riddor_hse_ref ? `, HSE ref ${full.riddor_hse_ref}` : ""}`],
+        ["CQC_FLAG", !!before.cqc_notifiable !== !!full.cqc_notifiable,
+          full.cqc_notifiable ? "Marked CQC notifiable" : "CQC notifiable flag removed"],
+        ["CQC_FLAG", (before.cqc_type || null) !== (full.cqc_type || null) && !!full.cqc_type,
+          `CQC notification type: ${CQC_TYPES[full.cqc_type] || full.cqc_type}`],
+        ["CQC_SUBMITTED", toDateStr(before.cqc_submitted_at) !== toDateStr(full.cqc_submitted_at) || (before.cqc_ref || null) !== (full.cqc_ref || null),
+          `CQC notification sent: ${fmtD(full.cqc_submitted_at)}${full.cqc_ref ? `, ref ${full.cqc_ref}` : ""}`],
+      ];
+      for (const [action, changed, details] of regAudit) {
+        if (changed) await logIncidentAudit(id, auth, action, `${details} (by ${auth.name})`);
       }
       if ((before.responsible_manager_id || null) !== (full.responsible_manager_id || null)) {
         await logIncidentAudit(
@@ -3948,6 +4462,17 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       return json({ id: row.id, active: body.active !== undefined ? body.active : true });
     }
 
+    // ---- Scheduled sweep (escalations, regulatory deadlines, retention) ----
+    // Runs every 15 minutes inside the app; this endpoint lets an external
+    // scheduler (e.g. a Railway cron) trigger it too, using DIGEST_SECRET.
+    if (path === "/api/cron/sweep" && method === "POST") {
+      const auth = await getAuth(req);
+      const key = req.headers.get("x-digest-key");
+      const allowed = isMgrOrAdmin(auth) || (DIGEST_SECRET && key === DIGEST_SECRET);
+      if (!allowed) return json({ error: "Unauthorized" }, 401);
+      return json(await runScheduledSweep());
+    }
+
     // ---- Weekly digest ----
     if (path === "/api/digest/run" && method === "POST") {
       const auth = await getAuth(req);
@@ -3961,7 +4486,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (path === "/api/settings" && method === "GET") {
       const auth = await getAuth(req);
       if (!auth) return json({ error: "Unauthorized" }, 401);
-      return json({ daysToRespond: await getDaysToRespond(), hoursToAllocate: await getHoursToAllocate() });
+      await loadCandourTarget();
+      return json({ daysToRespond: await getDaysToRespond(), hoursToAllocate: await getHoursToAllocate(), candourTargetDays });
     }
 
     if (path === "/api/settings" && method === "PUT") {
@@ -3971,11 +4497,15 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       const body = await req.json();
       const days = Math.max(1, Math.min(5, Math.round(Number(body.daysToRespond) || 5)));
       const hours = Math.max(1, Math.min(72, Math.round(Number(body.hoursToAllocate) || 24)));
+      const candour = body.candourTargetDays === undefined
+        ? candourTargetDays
+        : Math.max(1, Math.min(30, Math.round(Number(body.candourTargetDays) || 10)));
       await sql`
-        INSERT INTO app_settings (id, days_to_respond, hours_to_allocate) VALUES (1, ${days}, ${hours})
-        ON CONFLICT (id) DO UPDATE SET days_to_respond = ${days}, hours_to_allocate = ${hours}, updated_at = now()
+        INSERT INTO app_settings (id, days_to_respond, hours_to_allocate, candour_target_days) VALUES (1, ${days}, ${hours}, ${candour})
+        ON CONFLICT (id) DO UPDATE SET days_to_respond = ${days}, hours_to_allocate = ${hours}, candour_target_days = ${candour}, updated_at = now()
       `;
-      return json({ daysToRespond: days, hoursToAllocate: hours });
+      candourTargetDays = candour;
+      return json({ daysToRespond: days, hoursToAllocate: hours, candourTargetDays: candour });
     }
 
     if (path === "/api/case-notes" && method === "GET") {

@@ -1089,6 +1089,20 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
   const [riddorReportable, setRiddorReportable] = useState(incident.riddorReportable === true);
   const [cqcNotifiable, setCqcNotifiable] = useState(incident.cqcNotifiable === true);
   const [relatedIncidentId, setRelatedIncidentId] = useState(incident.relatedIncidentId || '');
+  // Regulatory compliance (duty of candour, RIDDOR, CQC)
+  const [harmLevel, setHarmLevel] = useState(incident.harmLevel || '');
+  const [docNotifiable, setDocNotifiable] = useState(incident.docNotifiable || '');
+  const [docVerbalAt, setDocVerbalAt] = useState(incident.docVerbalAt || '');
+  const [docApology, setDocApology] = useState(incident.docApology === true);
+  const [docWrittenAt, setDocWrittenAt] = useState(incident.docWrittenAt || '');
+  const [docFindingsSharedAt, setDocFindingsSharedAt] = useState(incident.docFindingsSharedAt || '');
+  const [docNotes, setDocNotes] = useState(incident.docNotes || '');
+  const [riddorType, setRiddorType] = useState(incident.riddorType || '');
+  const [riddorSubmittedAt, setRiddorSubmittedAt] = useState(incident.riddorSubmittedAt || '');
+  const [riddorHseRef, setRiddorHseRef] = useState(incident.riddorHseRef || '');
+  const [cqcType, setCqcType] = useState(incident.cqcType || '');
+  const [cqcSubmittedAt, setCqcSubmittedAt] = useState(incident.cqcSubmittedAt || '');
+  const [cqcRef, setCqcRef] = useState(incident.cqcRef || '');
   const [managers, setManagers] = useState([]);
   const [allIncidents, setAllIncidents] = useState([]);
   const [auditTrail, setAuditTrail] = useState([]);
@@ -1142,6 +1156,44 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
     setRiddorReportable(data.riddorReportable === true);
     setCqcNotifiable(data.cqcNotifiable === true);
     setRelatedIncidentId(data.relatedIncidentId || '');
+    setHarmLevel(data.harmLevel || '');
+    setDocNotifiable(data.docNotifiable || '');
+    setDocVerbalAt(data.docVerbalAt || '');
+    setDocApology(data.docApology === true);
+    setDocWrittenAt(data.docWrittenAt || '');
+    setDocFindingsSharedAt(data.docFindingsSharedAt || '');
+    setDocNotes(data.docNotes || '');
+    setRiddorType(data.riddorType || '');
+    setRiddorSubmittedAt(data.riddorSubmittedAt || '');
+    setRiddorHseRef(data.riddorHseRef || '');
+    setCqcType(data.cqcType || '');
+    setCqcSubmittedAt(data.cqcSubmittedAt || '');
+    setCqcRef(data.cqcRef || '');
+  }
+
+  // Mirrors the closing checks in computeCompliance (index.tsx) using the
+  // values currently on screen, so managers see what's missing before saving.
+  function currentClosureBlockers() {
+    const out = [];
+    const triggers = CANDOUR_HARM.includes(harmLevel);
+    if (!harmLevel) out.push('Record the harm level (choose “No harm” if nobody was harmed).');
+    if (triggers && !docNotifiable) out.push('Duty of candour: decide whether this is a notifiable safety incident.');
+    if (docNotifiable === 'YES') {
+      if (!docVerbalAt) out.push('Duty of candour: record the date the person was told in person.');
+      if (!docApology) out.push('Duty of candour: confirm an apology was given.');
+      if (!docWrittenAt) out.push('Duty of candour: record the date the written follow-up was sent.');
+      if (!docFindingsSharedAt) out.push('Duty of candour: record the date the findings were shared.');
+    }
+    if (riddorReportable) {
+      if (!riddorType) out.push('RIDDOR: choose the report type.');
+      if (!riddorSubmittedAt) out.push('RIDDOR: record the date the report was submitted to HSE.');
+      if (!riddorHseRef.trim()) out.push('RIDDOR: record the HSE reference number.');
+    }
+    if (cqcNotifiable) {
+      if (!cqcType) out.push('CQC: choose the notification type.');
+      if (!cqcSubmittedAt) out.push('CQC: record the date the notification was sent.');
+    }
+    return out;
   }
 
   // The matrix only suggests a severity — once the admin has touched the
@@ -1279,7 +1331,21 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
         riddorReportable,
         cqcNotifiable,
         relatedIncidentId: relatedIncidentId || null,
+        harmLevel: harmLevel || null,
+        docNotifiable: docNotifiable || null,
+        docVerbalAt: docVerbalAt || null,
+        docApology,
+        docWrittenAt: docWrittenAt || null,
+        docFindingsSharedAt: docFindingsSharedAt || null,
+        docNotes,
+        riddorType: riddorType || null,
+        riddorSubmittedAt: riddorSubmittedAt || null,
+        riddorHseRef,
+        cqcType: cqcType || null,
+        cqcSubmittedAt: cqcSubmittedAt || null,
+        cqcRef,
       });
+      await reload();
       await reloadAudit();
       onSaved();
     } catch (err) {
@@ -1382,7 +1448,7 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
           <button type="button" className="modal-close" onClick={onClose}>✕</button>
         </div>
 
-        {error && <div className="error-banner">{error}</div>}
+        {error && <div className="error-banner" style={{ whiteSpace: 'pre-line' }}>{error}</div>}
 
         {isClosed && (
           <div className="success-banner" style={{ marginBottom: 10 }}>
@@ -1489,12 +1555,25 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
               </div>
             </div>
           )}
-          {(full.riddorReportable || full.cqcNotifiable) && (
+          {full.harmReported !== null && full.harmReported !== undefined && (
             <div className="form-field">
-              <label>Regulatory flags</label>
+              <label>Reporter: anyone hurt / safeguarding?</label>
+              <div>{full.harmReported ? <span className="badge badge-red">Yes</span> : 'No'}</div>
+            </div>
+          )}
+          {full.harmLevel && (
+            <div className="form-field">
+              <label>Harm level</label>
+              <div>{HARM_LABELS[full.harmLevel] || full.harmLevel}</div>
+            </div>
+          )}
+          {(full.riddorReportable || full.cqcNotifiable || hasComplianceAction(full)) && (
+            <div className="form-field">
+              <label>Regulatory</label>
               <div>
                 {full.riddorReportable && <span className="badge badge-red" style={{ marginRight: 6 }}>RIDDOR</span>}
-                {full.cqcNotifiable && <span className="badge badge-amber">CQC notifiable</span>}
+                {full.cqcNotifiable && <span className="badge badge-amber" style={{ marginRight: 6 }}>CQC notifiable</span>}
+                {complianceBadges(full)}
               </div>
             </div>
           )}
@@ -1701,6 +1780,16 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
                   {INCIDENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
+              {status === 'CLOSED' && currentClosureBlockers().length > 0 && (
+                <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                  <div className="warning-banner">
+                    <strong>Before this incident can be closed:</strong>
+                    <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                      {currentClosureBlockers().map((b) => <li key={b}>{b}</li>)}
+                    </ul>
+                  </div>
+                </div>
+              )}
               <div className="form-field form-field-wide">
                 <label>Admin notes</label>
                 <textarea value={adminNotes} onChange={(e) => setAdminNotes(e.target.value)} rows={4} />
@@ -1829,20 +1918,6 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
                   <input type="date" value={completedResponseDate} onChange={(e) => setCompletedResponseDate(e.target.value)} />
                 </div>
                 <div className="form-field">
-                  <label>RIDDOR reportable?</label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400 }}>
-                    <input type="checkbox" checked={riddorReportable} onChange={(e) => setRiddorReportable(e.target.checked)} />
-                    Reportable under RIDDOR
-                  </label>
-                </div>
-                <div className="form-field">
-                  <label>CQC notifiable?</label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400 }}>
-                    <input type="checkbox" checked={cqcNotifiable} onChange={(e) => setCqcNotifiable(e.target.checked)} />
-                    Notifiable to CQC
-                  </label>
-                </div>
-                <div className="form-field">
                   <label>Related / duplicate incident</label>
                   <select value={relatedIncidentId} onChange={(e) => setRelatedIncidentId(e.target.value)}>
                     <option value="">None</option>
@@ -1851,6 +1926,158 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
                     ))}
                   </select>
                 </div>
+              </div>
+
+              <div className="settings-section-title settings-section-spaced">Harm and duty of candour</div>
+              <div className="form-grid">
+                <div className="form-field">
+                  <label>Harm level</label>
+                  <select value={harmLevel} onChange={(e) => setHarmLevel(e.target.value)}>
+                    <option value="">Not recorded</option>
+                    {HARM_LEVELS.map((h) => <option key={h} value={h}>{HARM_LABELS[h]}</option>)}
+                  </select>
+                </div>
+                {(CANDOUR_HARM.includes(harmLevel) || docNotifiable) ? (
+                  <div className="form-field">
+                    <label>Notifiable safety incident?</label>
+                    <select value={docNotifiable} onChange={(e) => setDocNotifiable(e.target.value)}>
+                      <option value="">Not decided</option>
+                      <option value="YES">Yes — duty of candour applies</option>
+                      <option value="NO">No</option>
+                    </select>
+                  </div>
+                ) : (
+                  <div className="form-field">
+                    <label>Duty of candour</label>
+                    <div className="muted" style={{ fontSize: 13 }}>Applies when harm is moderate or worse.</div>
+                  </div>
+                )}
+                {(CANDOUR_HARM.includes(harmLevel) || docNotifiable) && (
+                  <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                    <div className="muted" style={{ fontSize: 13 }}>
+                      Notifiable if it was unintended or unexpected, happened while providing care, and in a clinician's
+                      reasonable opinion caused (or could result in) moderate harm, severe harm, prolonged psychological
+                      harm or death.
+                      {full.docDecidedBy && full.docNotifiable && <> Decision recorded by {full.docDecidedBy} on {fmtDate(full.docDecidedAt)}.</>}
+                    </div>
+                  </div>
+                )}
+                {docNotifiable === 'YES' && (
+                  <>
+                    <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                      <label>Progress</label>
+                      <div>
+                        {deadlineBadge(full.compliance?.candour?.state)}
+                        {full.compliance?.candour?.dueAt && !['DONE', 'AWAITING_FINDINGS'].includes(full.compliance.candour.state) && (
+                          <span className="muted" style={{ marginLeft: 8 }}>Target: {fmtDeadline(full.compliance.candour.dueAt)}</span>
+                        )}
+                        {full.docNotifiable !== 'YES' && <span className="muted">Save to start the deadline.</span>}
+                      </div>
+                    </div>
+                    <div className="form-field">
+                      <label>Date person told in person</label>
+                      <input type="date" value={docVerbalAt} onChange={(e) => setDocVerbalAt(e.target.value)} />
+                    </div>
+                    <div className="form-field">
+                      <label>Apology</label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400 }}>
+                        <input type="checkbox" checked={docApology} onChange={(e) => setDocApology(e.target.checked)} />
+                        An apology was given
+                      </label>
+                    </div>
+                    <div className="form-field">
+                      <label>Date written follow-up sent</label>
+                      <input type="date" value={docWrittenAt} onChange={(e) => setDocWrittenAt(e.target.value)} />
+                    </div>
+                    <div className="form-field">
+                      <label>Date findings shared</label>
+                      <input type="date" value={docFindingsSharedAt} onChange={(e) => setDocFindingsSharedAt(e.target.value)} />
+                    </div>
+                    <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                      <label>Candour notes (who was told, support offered)</label>
+                      <textarea value={docNotes} onChange={(e) => setDocNotes(e.target.value)} rows={3} />
+                      <div className="muted" style={{ marginTop: 4, fontSize: 13 }}>
+                        Upload a copy of the written follow-up letter under Photos &amp; statements.
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="settings-section-title settings-section-spaced">Regulatory reporting</div>
+              <div className="form-grid">
+                <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input type="checkbox" checked={riddorReportable} onChange={(e) => setRiddorReportable(e.target.checked)} />
+                    Reportable under RIDDOR (to HSE)
+                  </label>
+                </div>
+                {riddorReportable && (
+                  <>
+                    <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                      <label>RIDDOR report type</label>
+                      <select value={riddorType} onChange={(e) => setRiddorType(e.target.value)}>
+                        <option value="">Choose…</option>
+                        {Object.entries(RIDDOR_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select>
+                    </div>
+                    <div className="form-field">
+                      <label>Date submitted to HSE</label>
+                      <input type="date" value={riddorSubmittedAt} onChange={(e) => setRiddorSubmittedAt(e.target.value)} />
+                    </div>
+                    <div className="form-field">
+                      <label>HSE reference</label>
+                      <input value={riddorHseRef} onChange={(e) => setRiddorHseRef(e.target.value)} />
+                    </div>
+                    {full.compliance?.riddor && (
+                      <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                        <div>
+                          {deadlineBadge(full.compliance.riddor.state, { DONE: 'Submitted' })}
+                          <span className="muted" style={{ marginLeft: 8 }}>
+                            Deadline: {fmtDeadline(full.compliance.riddor.dueAt)} ({full.compliance.riddor.days} days from the incident
+                            {full.compliance.riddor.typeMissing ? '; choose a type — 10 days assumed' : ''}). Deaths and specified
+                            injuries must also be notified without delay.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+                <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input type="checkbox" checked={cqcNotifiable} onChange={(e) => setCqcNotifiable(e.target.checked)} />
+                    Notifiable to CQC
+                  </label>
+                </div>
+                {cqcNotifiable && (
+                  <>
+                    <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                      <label>CQC notification type</label>
+                      <select value={cqcType} onChange={(e) => setCqcType(e.target.value)}>
+                        <option value="">Choose…</option>
+                        {Object.entries(CQC_TYPES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select>
+                    </div>
+                    <div className="form-field">
+                      <label>Date notification sent</label>
+                      <input type="date" value={cqcSubmittedAt} onChange={(e) => setCqcSubmittedAt(e.target.value)} />
+                    </div>
+                    <div className="form-field">
+                      <label>CQC reference (if given)</label>
+                      <input value={cqcRef} onChange={(e) => setCqcRef(e.target.value)} />
+                    </div>
+                    {full.compliance?.cqc && (
+                      <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                        <div>
+                          {deadlineBadge(full.compliance.cqc.state, { DONE: 'Sent' })}
+                          <span className="muted" style={{ marginLeft: 8 }}>
+                            Must be sent without delay — flagged {fmtDeadline(full.compliance.cqc.flaggedAt)}, overdue after {fmtDeadline(full.compliance.cqc.dueAt)}.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
 
               <div className="settings-section-title settings-section-spaced">Investigation — write-up</div>
@@ -1915,6 +2142,54 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
                 </div>
               </>
             )
+          )}
+
+          {!canEdit && (full.harmLevel || full.docNotifiable || full.riddorReportable || full.cqcNotifiable) && (
+            <>
+              <div className="settings-section-title settings-section-spaced">Regulatory record</div>
+              <div className="form-grid">
+                <div className="form-field">
+                  <label>Harm level</label>
+                  <div>{HARM_LABELS[full.harmLevel] || 'Not recorded'}</div>
+                </div>
+                <div className="form-field">
+                  <label>Notifiable safety incident</label>
+                  <div>
+                    {full.docNotifiable === 'YES' ? 'Yes' : full.docNotifiable === 'NO' ? 'No' : 'Not decided'}
+                    {full.docDecidedBy && <span className="muted"> — {full.docDecidedBy}, {fmtDate(full.docDecidedAt)}</span>}
+                  </div>
+                </div>
+                {full.docNotifiable === 'YES' && (
+                  <>
+                    <div className="form-field"><label>Told in person</label><div>{full.docVerbalAt ? fmtDate(full.docVerbalAt) : '—'}</div></div>
+                    <div className="form-field"><label>Apology given</label><div>{full.docApology ? 'Yes' : 'No'}</div></div>
+                    <div className="form-field"><label>Written follow-up</label><div>{full.docWrittenAt ? fmtDate(full.docWrittenAt) : '—'}</div></div>
+                    <div className="form-field"><label>Findings shared</label><div>{full.docFindingsSharedAt ? fmtDate(full.docFindingsSharedAt) : '—'}</div></div>
+                  </>
+                )}
+                {full.docNotes && (
+                  <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}><label>Candour notes</label><div className="policy-body">{full.docNotes}</div></div>
+                )}
+                {full.riddorReportable && (
+                  <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                    <label>RIDDOR</label>
+                    <div>
+                      {RIDDOR_TYPES[full.riddorType] || 'Type not recorded'} — submitted {full.riddorSubmittedAt ? fmtDate(full.riddorSubmittedAt) : 'not yet'}
+                      {full.riddorHseRef ? `, HSE ref ${full.riddorHseRef}` : ''} {deadlineBadge(full.compliance?.riddor?.state, { DONE: 'Submitted' })}
+                    </div>
+                  </div>
+                )}
+                {full.cqcNotifiable && (
+                  <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                    <label>CQC notification</label>
+                    <div>
+                      {CQC_TYPES[full.cqcType] || 'Type not recorded'} — sent {full.cqcSubmittedAt ? fmtDate(full.cqcSubmittedAt) : 'not yet'}
+                      {full.cqcRef ? `, ref ${full.cqcRef}` : ''} {deadlineBadge(full.compliance?.cqc?.state, { DONE: 'Sent' })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
           )}
 
           {auditTrail.length > 0 && (
@@ -2118,6 +2393,7 @@ function Settings() {
 
   const [daysToRespond, setDaysToRespond] = useState(5);
   const [hoursToAllocate, setHoursToAllocate] = useState(24);
+  const [candourTargetDays, setCandourTargetDays] = useState(10);
   const [slaError, setSlaError] = useState('');
   const [slaSuccess, setSlaSuccess] = useState('');
   const [slaBusy, setSlaBusy] = useState(false);
@@ -2137,6 +2413,7 @@ function Settings() {
       api.getSettings().then((s) => {
         setDaysToRespond(s.daysToRespond);
         setHoursToAllocate(s.hoursToAllocate);
+        if (s.candourTargetDays) setCandourTargetDays(s.candourTargetDays);
       }).catch(() => {});
       api.listStaff().then(setStaffList).catch(() => {});
     }
@@ -2177,9 +2454,14 @@ function Settings() {
     setSlaSuccess('');
     setSlaBusy(true);
     try {
-      const saved = await api.updateSettings({ daysToRespond: Number(daysToRespond), hoursToAllocate: Number(hoursToAllocate) });
+      const saved = await api.updateSettings({
+        daysToRespond: Number(daysToRespond),
+        hoursToAllocate: Number(hoursToAllocate),
+        candourTargetDays: Number(candourTargetDays),
+      });
       setDaysToRespond(saved.daysToRespond);
       setHoursToAllocate(saved.hoursToAllocate);
+      if (saved.candourTargetDays) setCandourTargetDays(saved.candourTargetDays);
       setSlaSuccess('Incident response setting saved.');
     } catch (err) {
       setSlaError(err.message || 'Failed to save setting');
@@ -2312,12 +2594,23 @@ function Settings() {
                   {[4, 8, 12, 24, 48, 72].map((h) => <option key={h} value={h}>{h} hour{h === 1 ? '' : 's'}</option>)}
                 </select>
               </div>
+              <div className="form-field">
+                <label>Duty of candour target</label>
+                <select value={candourTargetDays} onChange={(e) => setCandourTargetDays(Number(e.target.value))}>
+                  {[1, 2, 3, 5, 7, 10, 14, 20, 30].map((d) => <option key={d} value={d}>{d} day{d === 1 ? '' : 's'}</option>)}
+                </select>
+              </div>
             </div>
             <p className="muted" style={{ marginTop: 4 }}>
               Incidents are flagged amber within 24 hours of this deadline, and red once overdue. Maximum 5 days.
               Every open incident must have a responsible manager allocated within the hours above — unallocated
               incidents are flagged amber as the deadline nears and red once overdue. Once a manager is allocated,
               only the response SLA above applies.
+            </p>
+            <p className="muted" style={{ marginTop: 4 }}>
+              Duty of candour target: once an incident is recorded as a notifiable safety incident, the person must be told
+              in person, given an apology and sent a written follow-up within this many days. The law says “as soon as
+              reasonably practicable”, so this is your internal target.
             </p>
 
             <div className="settings-footer">
@@ -2445,6 +2738,79 @@ const CATEGORY_LABELS = {
   INFECTION_CONTROL: 'Infection Control',
 };
 
+// ---- Regulatory compliance (duty of candour, RIDDOR, CQC) ----
+// Keep in step with HARM_LEVELS / RIDDOR_TYPES / CQC_TYPES in index.tsx.
+const HARM_LEVELS = ['NONE', 'LOW', 'MODERATE', 'SEVERE', 'PROLONGED_PSYCHOLOGICAL', 'DEATH'];
+const HARM_LABELS = {
+  NONE: 'No harm',
+  LOW: 'Low harm',
+  MODERATE: 'Moderate harm',
+  SEVERE: 'Severe harm',
+  PROLONGED_PSYCHOLOGICAL: 'Prolonged psychological harm',
+  DEATH: 'Death',
+};
+const CANDOUR_HARM = ['MODERATE', 'SEVERE', 'PROLONGED_PSYCHOLOGICAL', 'DEATH'];
+const RIDDOR_TYPES = {
+  DEATH: 'Work-related death (10 days)',
+  SPECIFIED_INJURY: 'Specified injury to a worker (10 days)',
+  OVER_7_DAY: 'Over-7-day incapacitation of a worker (15 days)',
+  NON_WORKER_HOSPITAL: 'Non-worker taken to hospital for treatment (10 days)',
+  DANGEROUS_OCCURRENCE: 'Dangerous occurrence (10 days)',
+};
+const CQC_TYPES = {
+  DEATH: 'Death of a person using the service',
+  SERIOUS_INJURY: 'Serious injury',
+  ABUSE: 'Abuse or allegation of abuse',
+  POLICE: 'Incident reported to or investigated by the police',
+  SERVICE_DISRUPTION: 'Event that stops or may stop the service running safely',
+  OTHER: 'Other notification',
+};
+
+function fmtDeadline(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// One badge for a deadline state from incident.compliance (see
+// computeCompliance in index.tsx).
+function deadlineBadge(state, labels) {
+  if (!state) return null;
+  const cls = {
+    RED: 'badge-red', AMBER: 'badge-amber', GREEN: 'badge-blue', DONE: 'badge-green',
+    DECISION_NEEDED: 'badge-amber', AWAITING_FINDINGS: 'badge-blue', NOT_NOTIFIABLE: 'badge-grey',
+  }[state] || 'badge-grey';
+  const defaults = {
+    RED: 'Overdue', AMBER: 'Due soon', GREEN: 'On track', DONE: 'Done',
+    DECISION_NEEDED: 'Decision needed', AWAITING_FINDINGS: 'Findings to share', NOT_NOTIFIABLE: 'Not notifiable',
+  };
+  return <span className={'badge ' + cls}>{(labels && labels[state]) || defaults[state] || state}</span>;
+}
+
+// Compact badges for lists: only items that still need action.
+function complianceBadges(i) {
+  const c = i.compliance || {};
+  const out = [];
+  const needs = (s) => s && !['DONE', 'NOT_NOTIFIABLE'].includes(s);
+  if (needs(c.candour?.state)) {
+    const red = c.candour.state === 'RED';
+    out.push(<span key="doc" className={'badge ' + (red ? 'badge-red' : 'badge-amber')} style={{ marginRight: 6 }}>
+      Candour{c.candour.state === 'DECISION_NEEDED' ? ': decide' : red ? ': overdue' : ''}</span>);
+  }
+  if (c.riddor && c.riddor.state !== 'DONE') {
+    out.push(<span key="riddor" className={'badge ' + (c.riddor.state === 'RED' ? 'badge-red' : 'badge-amber')} style={{ marginRight: 6 }}>
+      RIDDOR{c.riddor.state === 'RED' ? ': overdue' : ': to submit'}</span>);
+  }
+  if (c.cqc && c.cqc.state !== 'DONE') {
+    out.push(<span key="cqc" className={'badge ' + (c.cqc.state === 'RED' ? 'badge-red' : 'badge-amber')} style={{ marginRight: 6 }}>
+      CQC{c.cqc.state === 'RED' ? ': overdue' : ': to notify'}</span>);
+  }
+  return out;
+}
+
+function hasComplianceAction(i) {
+  return complianceBadges(i).length > 0;
+}
+
 function severityBadgeClass(severity) {
   if (severity === 'CRITICAL' || severity === 'HIGH') return 'badge-red';
   if (severity === 'MEDIUM') return 'badge-amber';
@@ -2568,7 +2934,7 @@ function allocationStatusBadge(allocationStatus) {
   );
 }
 
-const EMPTY_FILTERS = { status: '', severity: '', category: '', managerId: '', from: '', to: '', riddor: false, cqc: false, unallocated: false, q: '' };
+const EMPTY_FILTERS = { status: '', severity: '', category: '', managerId: '', from: '', to: '', riddor: false, cqc: false, unallocated: false, regAction: false, q: '' };
 
 function Incidents() {
   const { user } = useAuth();
@@ -2609,6 +2975,7 @@ function Incidents() {
     if (filters.riddor && !i.riddorReportable) return false;
     if (filters.cqc && !i.cqcNotifiable) return false;
     if (filters.unallocated && i.allocationStatus !== 'RED') return false;
+    if (filters.regAction && !hasComplianceAction(i)) return false;
     if (filters.q) {
       const q = filters.q.trim().toLowerCase();
       const haystack = [i.ref, i.description, i.location, i.reporterName, i.cadRef, i.callSign, i.vehicleReg]
@@ -2713,6 +3080,10 @@ function Incidents() {
               <input type="checkbox" checked={filters.unallocated} onChange={(e) => setFilters({ ...filters, unallocated: e.target.checked })} />
               Unallocated overdue
             </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontWeight: 400 }}>
+              <input type="checkbox" checked={filters.regAction} onChange={(e) => setFilters({ ...filters, regAction: e.target.checked })} />
+              Candour / RIDDOR / CQC action due
+            </label>
           </div>
         </div>
         {filtersActive && (
@@ -2753,7 +3124,10 @@ function Incidents() {
                   <td>{i.location || '—'}</td>
                   <td>{CATEGORY_LABELS[i.category] || '—'}</td>
                   <td><span className={'badge ' + severityBadgeClass(i.severity)}>{i.severity}</span></td>
-                  <td><span className={'badge ' + statusBadgeClass(i.status)}>{i.status}</span></td>
+                  <td>
+                    <span className={'badge ' + statusBadgeClass(i.status)} style={{ marginRight: 6 }}>{i.status}</span>
+                    {complianceBadges(i)}
+                  </td>
                   <td>{responseStatusBadge(i.responseStatus)}</td>
                   {isAdmin && <td>{allocationStatusBadge(i.allocationStatus)}</td>}
                   {isAdmin && <td>{i.isAnonymous ? 'Anonymous' : (i.reporterName || i.notifiedBy || '—')}</td>}
@@ -2892,6 +3266,7 @@ function PublicReport() {
   const [crew2Grade, setCrew2Grade] = useState('');
   const [category, setCategory] = useState(INCIDENT_CATEGORIES[0]);
   const [anonymous, setAnonymous] = useState(false);
+  const [harmReported, setHarmReported] = useState('');
   const [reporterEmail, setReporterEmail] = useState('');
   const [notifiedBy, setNotifiedBy] = useState('');
   const [onCallManagerInformed, setOnCallManagerInformed] = useState('');
@@ -2917,6 +3292,7 @@ function PublicReport() {
     setCrew2Grade('');
     setCategory(INCIDENT_CATEGORIES[0]);
     setAnonymous(false);
+    setHarmReported('');
     setReporterEmail('');
     setNotifiedBy('');
     setOnCallManagerInformed('');
@@ -2980,6 +3356,7 @@ function PublicReport() {
       form.append('crewNames', buildCrewNames());
       form.append('category', category);
       form.append('anonymous', String(isAnonymous));
+      form.append('harmReported', harmReported === 'YES' ? 'true' : harmReported === 'NO' ? 'false' : '');
       form.append('reporterEmail', isAnonymous ? '' : reporterEmail);
       form.append('notifiedBy', notifiedBy);
       form.append('onCallManagerInformed', String(onCallManagerInformed === 'YES'));
@@ -3081,6 +3458,20 @@ function PublicReport() {
               </label>
             </div>
           )}
+
+          <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+            <label>Was anyone hurt or injured, or is this a safeguarding concern?</label>
+            <select value={harmReported} onChange={(e) => setHarmReported(e.target.value)} required>
+              <option value="" disabled>Select an answer</option>
+              <option value="YES">Yes</option>
+              <option value="NO">No</option>
+            </select>
+            {harmReported === 'YES' && (
+              <div className="muted" style={{ marginTop: 4, fontSize: 13 }}>
+                Managers will be alerted as soon as you submit. If anyone is in immediate danger, call 999 first.
+              </div>
+            )}
+          </div>
 
           <div className="form-field">
             <label>Crew member 1 — name</label>
@@ -3351,7 +3742,7 @@ function Dashboard() {
     .slice(0, 6);
 
   const flagged = incidents
-    .filter((i) => i.riddorReportable || i.cqcNotifiable)
+    .filter((i) => i.riddorReportable || i.cqcNotifiable || hasComplianceAction(i))
     .sort((a, b) => new Date(b.occurredAt) - new Date(a.occurredAt));
 
   return (
@@ -3514,7 +3905,8 @@ function Dashboard() {
                   <td>{CATEGORY_LABELS[i.category] || '—'}</td>
                   <td>
                     {i.riddorReportable && <span className="badge badge-red" style={{ marginRight: 6 }}>RIDDOR</span>}
-                    {i.cqcNotifiable && <span className="badge badge-amber">CQC</span>}
+                    {i.cqcNotifiable && <span className="badge badge-amber" style={{ marginRight: 6 }}>CQC</span>}
+                    {complianceBadges(i)}
                   </td>
                   <td><span className={'badge ' + statusBadgeClass(i.status)}>{i.status}</span></td>
                 </tr>
