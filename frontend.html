@@ -1227,8 +1227,7 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
   }
 
   useEffect(() => {
-    reload();
-    reloadAudit();
+    reload().finally(reloadAudit);
     reloadActions();
     if (isAdmin) {
       api.listStaff().then((rows) => setManagers(rows.filter((s) => s.role === 'ADMIN' || s.role === 'MANAGER'))).catch(() => {});
@@ -1367,6 +1366,7 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
       formData.append('file', file);
       await api.uploadIncidentAttachment(incident.id, formData);
       await reload();
+      await reloadAudit();
     } catch (err) {
       setError(err.message || 'Failed to upload file');
     } finally {
@@ -1378,6 +1378,7 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
     try {
       const { url } = await api.getIncidentAttachmentDownloadUrl(incident.id, attachment.id);
       window.open(url, '_blank');
+      reloadAudit();
     } catch (err) {
       setError(err.message || 'Failed to get download link');
     }
@@ -2195,6 +2196,24 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
           {auditTrail.length > 0 && (
             <>
               <div className="settings-section-title settings-section-spaced">Audit trail</div>
+              {(() => {
+                const views = {};
+                for (const e of auditTrail) {
+                  if (e.action !== 'VIEWED') continue;
+                  const name = e.actorName || 'Unknown';
+                  views[name] = views[name] || { count: 0, last: e.createdAt };
+                  views[name].count += 1;
+                  if (new Date(e.createdAt) > new Date(views[name].last)) views[name].last = e.createdAt;
+                }
+                const names = Object.keys(views);
+                if (!names.length) return null;
+                return (
+                  <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+                    <strong>Opened by:</strong>{' '}
+                    {names.map((n) => `${n} (${views[n].count} visit${views[n].count === 1 ? '' : 's'}, last ${fmtAuditTimestamp(views[n].last)})`).join(' · ')}
+                  </div>
+                );
+              })()}
               <div className="kpi-list" style={{ marginBottom: 10 }}>
                 {auditTrail.map((e) => (
                   <div key={e.id} className="kpi-list-row">

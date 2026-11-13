@@ -1273,6 +1273,23 @@ async function logIncidentAudit(incidentId: number, auth: any, action: string, d
   `;
 }
 
+// Records that a staff member opened an incident (even just to read it).
+// Repeat opens by the same person within VIEW_LOG_WINDOW_MINUTES are folded
+// into one entry so reloads after saving don't flood the trail; every person
+// who opens it, and every separate visit, is still recorded.
+const VIEW_LOG_WINDOW_MINUTES = 30;
+async function logIncidentView(incidentId: number, auth: any) {
+  if (!auth?.sub) return;
+  const [recent] = await sql`
+    SELECT id FROM incident_audit_log
+    WHERE incident_id = ${incidentId} AND action = 'VIEWED' AND actor_id = ${auth.sub}
+      AND created_at > now() - make_interval(mins => ${VIEW_LOG_WINDOW_MINUTES})
+    LIMIT 1
+  `;
+  if (recent) return;
+  await logIncidentAudit(incidentId, auth, "VIEWED", `Incident opened by ${auth.name}`);
+}
+
 function serializeIncidentAuditEntry(row: any) {
   return {
     id: row.id,
@@ -3860,6 +3877,7 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       `;
       if (!row) return json({ error: "Not found" }, 404);
       if (!isMgrOrAdmin(auth) && row.reported_by !== auth.sub) return json({ error: "Forbidden" }, 403);
+      await logIncidentView(id, auth);
       const daysToRespond = await getDaysToRespond();
       const hoursToAllocate = await getHoursToAllocate();
       const attachments = await sql`
@@ -4203,6 +4221,7 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       const [attachment] = await sql`SELECT * FROM incident_attachments WHERE id = ${attachmentId} AND incident_id = ${id}`;
       if (!attachment) return json({ error: "Not found" }, 404);
       const downloadUrl = await storagePresign(attachment.file_key);
+      await logIncidentAudit(id, auth, "ATTACHMENT_OPENED", `"${attachment.file_name}" opened by ${auth.name}`);
       return json({ url: downloadUrl, fileName: attachment.file_name });
     }
 
