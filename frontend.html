@@ -1793,45 +1793,6 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
         )}
 
         <form onSubmit={handleSave}>
-          <div className="settings-section-title settings-section-spaced">Status</div>
-          {canEdit ? (
-            <div className="form-grid">
-              <div className="form-field">
-                <label>Status</label>
-                <select value={status} onChange={(e) => setStatus(e.target.value)}>
-                  {INCIDENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </div>
-              {status === 'CLOSED' && currentClosureBlockers().length > 0 && (
-                <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
-                  <div className="warning-banner">
-                    <strong>Before this incident can be closed:</strong>
-                    <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
-                      {currentClosureBlockers().map((b) => <li key={b}>{b}</li>)}
-                    </ul>
-                  </div>
-                </div>
-              )}
-              <div className="form-field form-field-wide">
-                <label>Admin notes</label>
-                <textarea value={adminNotes} onChange={(e) => setAdminNotes(e.target.value)} rows={4} />
-              </div>
-            </div>
-          ) : (
-            <div className="form-grid">
-              <div className="form-field">
-                <label>Status</label>
-                <div><span className={'badge ' + statusBadgeClass(full.status)}>{full.status}</span></div>
-              </div>
-              {full.adminNotes && (
-                <div className="form-field form-field-wide">
-                  <label>Notes from admin</label>
-                  <div className="policy-body">{full.adminNotes}</div>
-                </div>
-              )}
-            </div>
-          )}
-
           <div className="settings-section-title settings-section-spaced">Risk assessment</div>
           {canEdit ? (
             <div className="form-field form-field-wide risk-section">
@@ -2171,6 +2132,45 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
                 </div>
               </>
             )
+          )}
+
+          <div className="settings-section-title settings-section-spaced">Status</div>
+          {canEdit ? (
+            <div className="form-grid">
+              <div className="form-field">
+                <label>Status</label>
+                <select value={status} onChange={(e) => setStatus(e.target.value)}>
+                  {INCIDENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+              {status === 'CLOSED' && currentClosureBlockers().length > 0 && (
+                <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                  <div className="warning-banner">
+                    <strong>Before this incident can be closed:</strong>
+                    <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                      {currentClosureBlockers().map((b) => <li key={b}>{b}</li>)}
+                    </ul>
+                  </div>
+                </div>
+              )}
+              <div className="form-field form-field-wide">
+                <label>Admin notes</label>
+                <textarea value={adminNotes} onChange={(e) => setAdminNotes(e.target.value)} rows={4} />
+              </div>
+            </div>
+          ) : (
+            <div className="form-grid">
+              <div className="form-field">
+                <label>Status</label>
+                <div><span className={'badge ' + statusBadgeClass(full.status)}>{full.status}</span></div>
+              </div>
+              {full.adminNotes && (
+                <div className="form-field form-field-wide">
+                  <label>Notes from admin</label>
+                  <div className="policy-body">{full.adminNotes}</div>
+                </div>
+              )}
+            </div>
           )}
 
           {!canEdit && (full.harmLevel || full.docNotifiable || full.riddorReportable || full.cqcNotifiable) && (
