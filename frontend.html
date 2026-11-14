@@ -568,7 +568,7 @@ const api = {
     request(`/incidents/${incidentId}/attachments/${attachmentId}/download`),
   renameIncidentAttachment: (incidentId, attachmentId, fileName) =>
     request(`/incidents/${incidentId}/attachments/${attachmentId}`, { method: 'PATCH', body: { fileName } }),
-  exportIncidentDocx: (incidentId) => downloadBlob(`/incidents/${incidentId}/export`),
+  exportIncidentPdf: (incidentId) => downloadBlob(`/incidents/${incidentId}/export`),
   exportIncidentSummary: (params) => {
     const qs = new URLSearchParams(
       Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -1448,7 +1448,7 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
     setError('');
     setExporting(true);
     try {
-      await api.exportIncidentDocx(incident.id);
+      await api.exportIncidentPdf(incident.id);
       await reloadAudit();
     } catch (err) {
       setError(err.message || 'Failed to export incident report');
@@ -1500,7 +1500,7 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
 
         <div style={{ marginBottom: 10 }}>
           <button type="button" className="btn btn-ghost btn-sm" onClick={handleExport} disabled={exporting}>
-            {exporting ? 'Preparing…' : 'Download as Word (Investigation form)'}
+            {exporting ? 'Preparing…' : 'Download as PDF (Investigation form)'}
           </button>
         </div>
 

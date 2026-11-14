@@ -18,6 +18,7 @@ import {
 } from "docx";
 import { imageSize } from "image-size";
 import QRCode from "qrcode";
+import PDFDocument from "pdfkit";
 
 const JWT_SECRET = Bun.env.JWT_SECRET || "dev-secret-change-me";
 const SEED_ADMIN_EMAIL = Bun.env.SEED_ADMIN_EMAIL || "darren.teale@medicalemergencysolutions.co.uk";
@@ -1535,50 +1536,294 @@ function candourAnswer(incident: any): string {
 }
 
 // Duty of candour, RIDDOR and CQC record for the exported report — the
-// evidence an inspector asks for.
-function docRegulatorySection(incident: any) {
+// evidence an inspector asks for. Shared by the PDF and Word exports.
+function regulatoryPairs(incident: any): [string, string][] {
   const yesNo = (v: any) => (v ? "Yes" : "No");
-  const rows = [
-    docLabelRow("Harm level:", HARM_LABELS[incident.harmLevel] || "Not recorded"),
-    docLabelRow("Reporter said someone was hurt / safeguarding:",
-      incident.harmReported === true ? "Yes" : incident.harmReported === false ? "No" : "Not asked"),
-    docLabelRow("Notifiable safety incident (duty of candour):", candourAnswer(incident)),
+  const rows: [string, string][] = [
+    ["Harm level:", HARM_LABELS[incident.harmLevel] || "Not recorded"],
+    ["Reporter said someone was hurt / safeguarding:",
+      incident.harmReported === true ? "Yes" : incident.harmReported === false ? "No" : "Not asked"],
+    ["Notifiable safety incident (duty of candour):", candourAnswer(incident)],
   ];
   if (incident.docNotifiable) {
-    rows.push(docLabelRow("Decision recorded by:",
-      `${incident.docDecidedBy || ""}${incident.docDecidedAt ? " on " + fmtDocDate(incident.docDecidedAt) : ""}`));
+    rows.push(["Decision recorded by:",
+      `${incident.docDecidedBy || ""}${incident.docDecidedAt ? " on " + fmtDocDate(incident.docDecidedAt) : ""}`]);
   }
   if (incident.docNotifiable === "YES") {
     rows.push(
-      docLabelRow("Person told in person:", fmtDocDate(incident.docVerbalAt)),
-      docLabelRow("Apology given:", yesNo(incident.docApology)),
-      docLabelRow("Written follow-up sent:", fmtDocDate(incident.docWrittenAt)),
-      docLabelRow("Findings shared:", fmtDocDate(incident.docFindingsSharedAt)),
+      ["Person told in person:", fmtDocDate(incident.docVerbalAt)],
+      ["Apology given:", yesNo(incident.docApology)],
+      ["Written follow-up sent:", fmtDocDate(incident.docWrittenAt)],
+      ["Findings shared:", fmtDocDate(incident.docFindingsSharedAt)],
     );
   }
-  if (incident.docNotes) rows.push(docLabelRow("Candour notes:", incident.docNotes));
-  rows.push(docLabelRow("RIDDOR reportable:", yesNo(incident.riddorReportable)));
+  if (incident.docNotes) rows.push(["Candour notes:", incident.docNotes]);
+  rows.push(["RIDDOR reportable:", yesNo(incident.riddorReportable)]);
   if (incident.riddorReportable) {
     rows.push(
-      docLabelRow("RIDDOR type:", RIDDOR_TYPES[incident.riddorType]?.label || "Not recorded"),
-      docLabelRow("RIDDOR deadline:", incident.compliance?.riddor?.dueAt ? fmtDocDate(incident.compliance.riddor.dueAt) : ""),
-      docLabelRow("Submitted to HSE:", fmtDocDate(incident.riddorSubmittedAt)),
-      docLabelRow("HSE reference:", incident.riddorHseRef || ""),
+      ["RIDDOR type:", RIDDOR_TYPES[incident.riddorType]?.label || "Not recorded"],
+      ["RIDDOR deadline:", incident.compliance?.riddor?.dueAt ? fmtDocDate(incident.compliance.riddor.dueAt) : ""],
+      ["Submitted to HSE:", fmtDocDate(incident.riddorSubmittedAt)],
+      ["HSE reference:", incident.riddorHseRef || ""],
     );
   }
-  rows.push(docLabelRow("CQC notifiable:", yesNo(incident.cqcNotifiable)));
+  rows.push(["CQC notifiable:", yesNo(incident.cqcNotifiable)]);
   if (incident.cqcNotifiable) {
     rows.push(
-      docLabelRow("CQC notification type:", CQC_TYPES[incident.cqcType] || "Not recorded"),
-      docLabelRow("Flagged:", incident.cqcFlaggedAt ? fmtDocDateTime(incident.cqcFlaggedAt) : ""),
-      docLabelRow("Notification sent:", fmtDocDate(incident.cqcSubmittedAt)),
-      docLabelRow("CQC reference:", incident.cqcRef || ""),
+      ["CQC notification type:", CQC_TYPES[incident.cqcType] || "Not recorded"],
+      ["Flagged:", incident.cqcFlaggedAt ? fmtDocDateTime(incident.cqcFlaggedAt) : ""],
+      ["Notification sent:", fmtDocDate(incident.cqcSubmittedAt)],
+      ["CQC reference:", incident.cqcRef || ""],
     );
   }
+  return rows;
+}
+
+function docRegulatorySection(incident: any) {
   return [
     new Paragraph({ text: "Regulatory reporting", heading: HeadingLevel.HEADING_2, spacing: { before: 240, after: 120 } }),
-    new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }),
+    new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: regulatoryPairs(incident).map(([l, v]) => docLabelRow(l, v)),
+    }),
   ];
+}
+
+// ---- PDF export of a single incident (the investigation form) ----
+// DejaVu Sans covers characters the built-in PDF fonts can't (e.g. the
+// "→" in audit entries); falls back to Helvetica if the font isn't found.
+function pdfFontPaths(): { regular: string; bold: string; italic: string } | null {
+  try {
+    const pkg = Bun.resolveSync("dejavu-fonts-ttf/package.json", import.meta.dir);
+    const dir = pkg.replace(/package\.json$/, "ttf/");
+    return { regular: dir + "DejaVuSans.ttf", bold: dir + "DejaVuSans-Bold.ttf", italic: dir + "DejaVuSans-Oblique.ttf" };
+  } catch (err) {
+    console.log(`PDF fonts not found, using Helvetica: ${err}`);
+    return null;
+  }
+}
+
+async function buildIncidentPdf(incident: any, photos: EmbeddablePhoto[] = [], skippedPhotoCount = 0): Promise<Uint8Array> {
+  const generatedAt = fmtDocDateTime(new Date());
+  const doc = new PDFDocument({
+    size: "A4",
+    margins: { top: 50, bottom: 60, left: 50, right: 50 },
+    bufferPages: true,
+    info: { Title: `Incident Report ${incident.ref || ""}`, Author: PRIVACY.controller, Subject: "Investigation response form" },
+  });
+  const chunks: Buffer[] = [];
+  doc.on("data", (c: Buffer) => chunks.push(c));
+  const done = new Promise<void>((resolve) => doc.on("end", () => resolve()));
+
+  const fonts = pdfFontPaths();
+  if (fonts) {
+    doc.registerFont("R", fonts.regular);
+    doc.registerFont("B", fonts.bold);
+    doc.registerFont("I", fonts.italic);
+  } else {
+    doc.registerFont("R", "Helvetica");
+    doc.registerFont("B", "Helvetica-Bold");
+    doc.registerFont("I", "Helvetica-Oblique");
+  }
+
+  const left = doc.page.margins.left;
+  const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const bottom = () => doc.page.height - doc.page.margins.bottom;
+  const LINE = "#9a9a9a";
+  const FILL = "#f2f2f2";
+  const ensure = (h: number) => { if (doc.y + h > bottom()) doc.addPage(); };
+
+  const heading = (text: string) => {
+    ensure(40);
+    doc.moveDown(0.8);
+    doc.font("B").fontSize(13).fillColor("#000").text(text, left, doc.y, { width });
+    doc.moveDown(0.3);
+  };
+
+  // Two-column label/value table with borders; rows split across pages.
+  const table = (rows: [string, string][]) => {
+    const labelW = width * 0.38;
+    const valueW = width - labelW;
+    const pad = 5;
+    for (const [label, value] of rows) {
+      doc.fontSize(10);
+      const lh = doc.font("B").heightOfString(label, { width: labelW - pad * 2 });
+      const vh = doc.font("R").heightOfString(value || " ", { width: valueW - pad * 2 });
+      const h = Math.max(lh, vh) + pad * 2;
+      ensure(Math.min(h, 200));
+      const y = doc.y;
+      doc.rect(left, y, labelW, h).fillAndStroke(FILL, LINE);
+      doc.rect(left + labelW, y, valueW, h).stroke(LINE);
+      doc.fillColor("#000").font("B").text(label, left + pad, y + pad, { width: labelW - pad * 2 });
+      doc.font("R").text(value || "", left + labelW + pad, y + pad, { width: valueW - pad * 2 });
+      doc.x = left;
+      doc.y = y + h;
+    }
+  };
+
+  // Boxed free-text section; long text flows onto further pages.
+  const textBox = (title: string, body: string) => {
+    heading(title);
+    const pad = 6;
+    const text = body && body.trim() ? body : " ";
+    doc.font("R").fontSize(10);
+    const paragraphs = text.split("\n");
+    let first = true;
+    for (const para of paragraphs) {
+      const h = doc.heightOfString(para || " ", { width: width - pad * 2 }) + (first ? pad : 0);
+      if (doc.y + Math.min(h, 60) > bottom()) doc.addPage();
+      const y = doc.y;
+      doc.text(para || " ", left + pad, y + (first ? pad : 0), { width: width - pad * 2 });
+      const endY = doc.y;
+      doc.moveTo(left, y).lineTo(left, endY).moveTo(left + width, y).lineTo(left + width, endY).stroke(LINE);
+      if (first) doc.moveTo(left, y).lineTo(left + width, y).stroke(LINE);
+      first = false;
+    }
+    doc.y += pad;
+    doc.moveTo(left, doc.y - pad).lineTo(left, doc.y).moveTo(left + width, doc.y - pad).lineTo(left + width, doc.y).stroke(LINE);
+    doc.moveTo(left, doc.y).lineTo(left + width, doc.y).stroke(LINE);
+    doc.x = left;
+  };
+
+  // ---- Title ----
+  doc.font("B").fontSize(20).fillColor("#000").text("Incident Report", left, doc.y, { width });
+  doc.font("B").fontSize(12).text("Investigation response form", { width });
+  doc.moveDown(0.3);
+  doc.font("I").fontSize(9).fillColor("#444").text(`Form generated: ${generatedAt}`, { width });
+  doc.fillColor("#000");
+  doc.moveDown(0.8);
+
+  table([
+    ["Date of incident:", fmtDocDate(incident.occurredAt)],
+    ["Incident Ref:", incident.ref || ""],
+    ["Responsible manager:", incident.responsibleManagerName || "Unassigned"],
+    ["Vehicle registration:", incident.vehicleReg || ""],
+    ["Reporter email:", incident.reporterEmail || ""],
+    ["CAD Ref:", incident.cadRef || ""],
+    ["Call sign:", incident.callSign || ""],
+    ["Crew names and grade:", incident.crewNames || ""],
+    ["Reported by:", incident.reporterName || incident.notifiedBy || ""],
+    ["On-call manager informed:", incident.onCallManagerInformed
+      ? `Yes${incident.onCallManagerName ? " — " + incident.onCallManagerName : ""}${incident.onCallManagerCalledAt ? " at " + incident.onCallManagerCalledAt : ""}`
+      : "No"],
+    ["Date sent to manager:", fmtDocDate(incident.dateSentToManager)],
+    ["Further information request by:", fmtDocDate(incident.infoRequestBy)],
+    ["Completed response date:", fmtDocDate(incident.completedResponseDate)],
+  ]);
+
+  // ---- Action required box ----
+  doc.moveDown(0.8);
+  {
+    const pad = 8;
+    const t1 = "Please note the Completed Response Date above and ensure completed documentation is forwarded to the investigator (sender of this form) by this date. Completed responses submitted ahead of this date would be appreciated.";
+    const t2 = "Any request for further information or documentation must be made within three calendar days of receipt of this document.";
+    doc.fontSize(10);
+    const h = doc.font("B").heightOfString("Action required", { width: width - pad * 2 })
+      + doc.font("R").heightOfString(t1, { width: width - pad * 2 })
+      + doc.heightOfString(t2, { width: width - pad * 2 }) + pad * 2 + 8;
+    ensure(h);
+    const y = doc.y;
+    doc.rect(left, y, width, h).stroke(LINE);
+    doc.font("B").text("Action required", left + pad, y + pad, { width: width - pad * 2 });
+    doc.font("R").text(t1, { width: width - pad * 2 });
+    doc.moveDown(0.3);
+    doc.text(t2, { width: width - pad * 2 });
+    doc.x = left;
+    doc.y = y + h;
+  }
+
+  textBox("Incident description", incident.description || "");
+  textBox("Outcome of investigation", incident.outcome || "");
+  textBox("Recommendations / conclusions", incident.recommendations || "");
+  textBox("Lessons learnt / action plan", incident.lessonsLearnt || "");
+
+  heading("Sign-off");
+  table([
+    ["Signature:", incident.signatureName || ""],
+    ["Investigator name:", incident.investigatorName || ""],
+    ["Designation:", incident.designation || ""],
+    ["Date:", fmtDocDate(incident.signOffDate)],
+  ]);
+
+  heading("Regulatory reporting");
+  table(regulatoryPairs(incident));
+
+  // ---- Photographs (PDF can embed JPEG and PNG) ----
+  const embeddable = photos.filter((p) => p.type === "jpg" || p.type === "png");
+  const skipped = skippedPhotoCount + (photos.length - embeddable.length);
+  if (embeddable.length || skipped) {
+    heading("Photographs");
+    for (const photo of embeddable) {
+      const maxW = Math.min(width, 420);
+      const maxH = 420;
+      let w = photo.width || maxW;
+      let h = photo.height || Math.round(maxW * 0.75);
+      const scale = Math.min(1, maxW / w, maxH / h);
+      w = w * scale; h = h * scale;
+      ensure(h + 24);
+      try {
+        doc.image(Buffer.from(photo.bytes), left, doc.y, { width: w, height: h });
+        doc.y += h + 3;
+      } catch (err) {
+        console.log(`PDF: could not embed ${photo.fileName}: ${err}`);
+      }
+      doc.font("I").fontSize(8).fillColor("#444").text(photo.fileName, left, doc.y, { width });
+      doc.fillColor("#000");
+      doc.moveDown(0.8);
+    }
+    if (skipped) {
+      doc.font("I").fontSize(9).fillColor("#444")
+        .text(`${skipped} attached file${skipped === 1 ? "" : "s"} could not be shown in this document and ${skipped === 1 ? "is" : "are"} available in Dynamo.`, left, doc.y, { width });
+      doc.fillColor("#000");
+    }
+  }
+
+  // ---- Audit trail ----
+  heading("Audit trail");
+  {
+    const cols = [0.22, 0.2, 0.18, 0.4].map((f) => f * width);
+    const pad = 4;
+    const row = (cells: string[], bold: boolean) => {
+      doc.fontSize(8.5).font(bold ? "B" : "R");
+      const h = Math.max(...cells.map((c, i) => doc.heightOfString(c || " ", { width: cols[i] - pad * 2 }))) + pad * 2;
+      if (doc.y + h > bottom()) {
+        doc.addPage();
+        if (!bold) row(["Timestamp", "Action", "By", "Details"], true);
+        doc.fontSize(8.5).font(bold ? "B" : "R");
+      }
+      const y = doc.y;
+      let x = left;
+      cells.forEach((c, i) => {
+        if (bold) doc.rect(x, y, cols[i], h).fillAndStroke(FILL, LINE);
+        else doc.rect(x, y, cols[i], h).stroke(LINE);
+        doc.fillColor("#000").text(c || "", x + pad, y + pad, { width: cols[i] - pad * 2 });
+        x += cols[i];
+      });
+      doc.x = left;
+      doc.y = y + h;
+    };
+    row(["Timestamp", "Action", "By", "Details"], true);
+    for (const e of incident.auditTrail || []) {
+      row([fmtDocDateTime(e.createdAt), String(e.action || "").replace(/_/g, " "), e.actorName || "", e.details || ""], false);
+    }
+  }
+
+  // ---- Footer on every page ----
+  const range = doc.bufferedPageRange();
+  for (let i = range.start; i < range.start + range.count; i++) {
+    doc.switchToPage(i);
+    const y = doc.page.height - 40;
+    const oldBottom = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    doc.font("R").fontSize(8).fillColor("#555");
+    doc.text(`QA4 · August 2025 v2 · ${incident.ref || ""} · Generated: ${generatedAt}`, left, y, { width: width - 80, lineBreak: false });
+    doc.text(`Page ${i - range.start + 1} of ${range.count}`, left + width - 80, y, { width: 80, align: "right", lineBreak: false });
+    doc.page.margins.bottom = oldBottom;
+  }
+
+  doc.end();
+  await done;
+  return new Uint8Array(Buffer.concat(chunks));
 }
 
 async function buildIncidentDocx(incident: any, photos: EmbeddablePhoto[] = [], skippedPhotoCount = 0) {
@@ -4223,13 +4468,13 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         }
       }
 
-      await logIncidentAudit(id, auth, "EXPORTED", `Word document exported by ${auth.name}`);
-      const buf = await buildIncidentDocx(incident, photos, skippedPhotoCount);
+      await logIncidentAudit(id, auth, "EXPORTED", `PDF exported by ${auth.name}`);
+      const buf = await buildIncidentPdf(incident, photos, skippedPhotoCount);
       return new Response(buf, {
         status: 200,
         headers: {
-          "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          "Content-Disposition": `attachment; filename="${String(incident.ref).replace(/[\\/]/g, "-")}.docx"`,
+          "Content-Type": "application/pdf",
+          "Content-Disposition": `attachment; filename="${String(incident.ref).replace(/[\\/]/g, "-").replace(/\s+/g, "")}.pdf"`,
         },
       });
     }
