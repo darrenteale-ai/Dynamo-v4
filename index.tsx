@@ -1283,19 +1283,23 @@ async function logIncidentAudit(incidentId: number, auth: any, action: string, d
 }
 
 // Records that a staff member opened an incident (even just to read it).
-// Repeat opens by the same person within VIEW_LOG_WINDOW_MINUTES are folded
-// into one entry so reloads after saving don't flood the trail; every person
-// who opens it, and every separate visit, is still recorded.
-const VIEW_LOG_WINDOW_MINUTES = 30;
-async function logIncidentView(incidentId: number, auth: any) {
+// The incident window asks for ?view=1 when it is opened, and ?view=0 when
+// it refreshes itself after a save or upload, so every open is recorded and
+// the automatic refreshes are not. A request with no view parameter (a page
+// loaded before this change) is recorded unless the same person was
+// recorded opening it in the last 2 minutes.
+async function logIncidentView(incidentId: number, auth: any, viewParam: string | null) {
   if (!auth?.sub) return;
-  const [recent] = await sql`
-    SELECT id FROM incident_audit_log
-    WHERE incident_id = ${incidentId} AND action = 'VIEWED' AND actor_id = ${auth.sub}
-      AND created_at > now() - make_interval(mins => ${VIEW_LOG_WINDOW_MINUTES})
-    LIMIT 1
-  `;
-  if (recent) return;
+  if (viewParam === "0") return;
+  if (viewParam !== "1") {
+    const [recent] = await sql`
+      SELECT id FROM incident_audit_log
+      WHERE incident_id = ${incidentId} AND action = 'VIEWED' AND actor_id = ${auth.sub}
+        AND created_at > now() - interval '2 minutes'
+      LIMIT 1
+    `;
+    if (recent) return;
+  }
   await logIncidentAudit(incidentId, auth, "VIEWED", `Incident opened by ${auth.name}`);
 }
 
@@ -3896,7 +3900,7 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       `;
       if (!row) return json({ error: "Not found" }, 404);
       if (!isMgrOrAdmin(auth) && row.reported_by !== auth.sub) return json({ error: "Forbidden" }, 403);
-      await logIncidentView(id, auth);
+      await logIncidentView(id, auth, url.searchParams.get("view"));
       const daysToRespond = await getDaysToRespond();
       const hoursToAllocate = await getHoursToAllocate();
       const attachments = await sql`

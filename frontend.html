@@ -557,7 +557,9 @@ const api = {
   resetStaffPasswords: (userIds) => request('/staff/reset-password', { method: 'POST', body: { userIds } }),
   getStaffProfile: (id) => request(`/staff/${id}`),
   listIncidents: () => request('/incidents'),
-  getIncident: (id) => request(`/incidents/${id}`),
+  // view=1 records an "opened" entry in the audit trail; view=0 is used for
+  // the incident window refreshing itself after a save or upload.
+  getIncident: (id, opts = {}) => request(`/incidents/${id}?view=${opts.opened ? 1 : 0}`),
   createIncident: (data) => request('/incidents', { method: 'POST', body: data }),
   createPublicIncident: (formData) => uploadRequest('/public/incidents', formData),
   updateIncident: (id, data) => request(`/incidents/${id}`, { method: 'PUT', body: data }),
@@ -1235,8 +1237,8 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
     setSeverityTouched(true);
   }
 
-  function reload() {
-    return api.getIncident(incident.id).then(applyFull);
+  function reload(opened = false) {
+    return api.getIncident(incident.id, { opened }).then(applyFull);
   }
 
   function reloadAudit() {
@@ -1248,7 +1250,7 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
   }
 
   useEffect(() => {
-    reload().finally(reloadAudit);
+    reload(true).finally(reloadAudit);
     reloadActions();
     if (isAdmin) {
       api.listStaff().then((rows) => setManagers(rows.filter((s) => s.role === 'ADMIN' || s.role === 'MANAGER'))).catch(() => {});
