@@ -3858,6 +3858,12 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         RETURNING id
       `;
       await logIncidentAudit(row.id, auth, "CREATED", `Incident ${ref} reported by ${auth.name}`);
+      if (body.responsibleManagerId) {
+        const [mgr] = await sql`SELECT name FROM users WHERE id = ${body.responsibleManagerId}`;
+        if (mgr) {
+          await logIncidentAudit(row.id, auth, "MANAGER_ASSIGNED", `Responsible manager set to ${mgr.name} when reported (by ${auth.name})`);
+        }
+      }
       if (body.severity === "HIGH" || body.severity === "CRITICAL") {
         // Fire-and-forget: never blocks the response.
         notifyHighSeverityIncident(ref, category, body.location || null, body.description || "").catch((err) =>

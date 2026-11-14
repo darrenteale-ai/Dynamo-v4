@@ -923,7 +923,15 @@ function IncidentModal({ onClose, onSaved }) {
   const [onCallManagerInformed, setOnCallManagerInformed] = useState('');
   const [onCallManagerName, setOnCallManagerName] = useState('');
   const [onCallManagerCalledAt, setOnCallManagerCalledAt] = useState('');
+  const [responsibleManagerId, setResponsibleManagerId] = useState('');
+  const [managers, setManagers] = useState([]);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    api.listStaff()
+      .then((rows) => setManagers(rows.filter((s) => s.active !== false && (s.role === 'ADMIN' || s.role === 'MANAGER'))))
+      .catch(() => {});
+  }, []);
   const [busy, setBusy] = useState(false);
 
   async function handleSubmit(e) {
@@ -946,6 +954,7 @@ function IncidentModal({ onClose, onSaved }) {
         onCallManagerInformed: onCallManagerInformed === 'YES',
         onCallManagerName,
         onCallManagerCalledAt,
+        responsibleManagerId: responsibleManagerId || null,
       });
       onSaved();
     } catch (err) {
@@ -983,6 +992,14 @@ function IncidentModal({ onClose, onSaved }) {
             <label>Severity</label>
             <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
               {INCIDENT_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+
+          <div className="form-field">
+            <label>Responsible manager (allocate now)</label>
+            <select value={responsibleManagerId} onChange={(e) => setResponsibleManagerId(e.target.value)}>
+              <option value="">Allocate later</option>
+              {managers.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
           </div>
 
@@ -3170,7 +3187,13 @@ function Incidents() {
                     {complianceBadges(i)}
                   </td>
                   <td>{responseStatusBadge(i.responseStatus)}</td>
-                  {isAdmin && <td>{allocationStatusBadge(i.allocationStatus)}</td>}
+                  {isAdmin && (
+                    <td>
+                      {i.responsibleManagerName
+                        ? <span title="Responsible manager">{i.responsibleManagerName}</span>
+                        : allocationStatusBadge(i.allocationStatus)}
+                    </td>
+                  )}
                   {isAdmin && <td>{i.isAnonymous ? 'Anonymous' : (i.reporterName || i.notifiedBy || '—')}</td>}
                 </tr>
               ))}
