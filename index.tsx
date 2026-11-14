@@ -1523,6 +1523,17 @@ function docPhotosSection(photos: EmbeddablePhoto[], skippedCount: number) {
   return blocks;
 }
 
+// "Yes" / "No" for the notifiable-safety-incident question. With no harm or
+// low harm recorded the duty of candour can't apply, so the answer is "No"
+// even though no decision was needed; "Not decided" only when the harm level
+// is moderate or worse (or not recorded) and nobody has decided yet.
+function candourAnswer(incident: any): string {
+  if (incident.docNotifiable === "YES") return "Yes";
+  if (incident.docNotifiable === "NO") return "No";
+  if (incident.harmLevel && !CANDOUR_HARM.has(incident.harmLevel)) return "No";
+  return "Not decided";
+}
+
 // Duty of candour, RIDDOR and CQC record for the exported report — the
 // evidence an inspector asks for.
 function docRegulatorySection(incident: any) {
@@ -1531,8 +1542,7 @@ function docRegulatorySection(incident: any) {
     docLabelRow("Harm level:", HARM_LABELS[incident.harmLevel] || "Not recorded"),
     docLabelRow("Reporter said someone was hurt / safeguarding:",
       incident.harmReported === true ? "Yes" : incident.harmReported === false ? "No" : "Not asked"),
-    docLabelRow("Notifiable safety incident (duty of candour):",
-      incident.docNotifiable === "YES" ? "Yes" : incident.docNotifiable === "NO" ? "No" : "Not decided"),
+    docLabelRow("Notifiable safety incident (duty of candour):", candourAnswer(incident)),
   ];
   if (incident.docNotifiable) {
     rows.push(docLabelRow("Decision recorded by:",

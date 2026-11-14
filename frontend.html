@@ -2186,7 +2186,10 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
                 <div className="form-field">
                   <label>Notifiable safety incident</label>
                   <div>
-                    {full.docNotifiable === 'YES' ? 'Yes' : full.docNotifiable === 'NO' ? 'No' : 'Not decided'}
+                    {full.docNotifiable === 'YES' ? 'Yes'
+                      : full.docNotifiable === 'NO' ? 'No'
+                      : (full.harmLevel && !CANDOUR_HARM.includes(full.harmLevel)) ? 'No'
+                      : 'Not decided'}
                     {full.docDecidedBy && <span className="muted"> — {full.docDecidedBy}, {fmtDate(full.docDecidedAt)}</span>}
                   </div>
                 </div>
