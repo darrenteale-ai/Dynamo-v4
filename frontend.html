@@ -3036,7 +3036,7 @@ function Incidents() {
     if (filters.regAction && !hasComplianceAction(i)) return false;
     if (filters.q) {
       const q = filters.q.trim().toLowerCase();
-      const haystack = [i.ref, i.description, i.location, i.reporterName, i.cadRef, i.callSign, i.vehicleReg]
+      const haystack = [i.ref, i.description, i.location, i.reporterName, i.investigatorName, i.cadRef, i.callSign, i.vehicleReg]
         .filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(q)) return false;
     }
@@ -3080,7 +3080,7 @@ function Incidents() {
           <label>Search</label>
           <input
             type="text"
-            placeholder="Ref, description, location…"
+            placeholder="Ref, description, location, investigator…"
             value={filters.q}
             onChange={(e) => setFilters({ ...filters, q: e.target.value })}
           />
@@ -3171,6 +3171,7 @@ function Incidents() {
                 <th>Status</th>
                 <th>Response</th>
                 {isAdmin && <th>Allocation</th>}
+                {isAdmin && <th>Investigator</th>}
                 {isAdmin && <th>Reported by</th>}
               </tr>
             </thead>
@@ -3194,6 +3195,7 @@ function Incidents() {
                         : allocationStatusBadge(i.allocationStatus)}
                     </td>
                   )}
+                  {isAdmin && <td>{i.investigatorName || <span className="muted">—</span>}</td>}
                   {isAdmin && <td>{i.isAnonymous ? 'Anonymous' : (i.reporterName || i.notifiedBy || '—')}</td>}
                 </tr>
               ))}
