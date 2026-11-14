@@ -1384,9 +1384,12 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
     setError('');
     setUploading(kind);
     try {
+      // Images are converted to a standard JPEG (and shrunk) the same way as
+      // on the QR form, so they display in Dynamo and in the PDF download.
+      const upload = file.type && file.type.startsWith('image/') ? await compressPhoto(file) : file;
       const formData = new FormData();
       formData.append('kind', kind);
-      formData.append('file', file);
+      formData.append('file', upload);
       await api.uploadIncidentAttachment(incident.id, formData);
       await reload();
       await reloadAudit();
@@ -3280,10 +3283,11 @@ function compressPhoto(file) {
       ctx.drawImage(img, 0, 0, width, height);
       canvas.toBlob(
         (blob) => {
-          if (!blob || blob.size >= file.size) {
-            // Compression didn't help (already small, or a format canvas
-            // re-encodes poorly) — keep the original rather than risk a
-            // worse result.
+          // Keep the original only if it's already a JPEG/PNG and compression
+          // didn't make it smaller. Other formats (HEIC, WebP, GIF…) are
+          // always converted so they display everywhere, including the PDF.
+          const alreadyStandard = file.type === 'image/jpeg' || file.type === 'image/png';
+          if (!blob || (alreadyStandard && blob.size >= file.size)) {
             resolve(file);
             return;
           }

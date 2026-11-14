@@ -1589,6 +1589,46 @@ function docRegulatorySection(incident: any) {
   ];
 }
 
+// Converts an uploaded image to an upright JPEG for the PDF. Uses sharp for
+// any format it can read (JPEG, PNG, WebP, GIF, TIFF, AVIF…), applying the
+// phone's EXIF rotation and capping the size at 1600px. If sharp can't read
+// it, a plain JPEG/PNG is still used as-is; anything else returns null.
+// sharp is native code, so it's loaded lazily: if it ever fails to load,
+// Dynamo still starts and the PDF falls back to plain JPEG/PNG photos.
+let sharpLoader: Promise<any> | null = null;
+function loadSharp(): Promise<any> {
+  if (!sharpLoader) {
+    sharpLoader = import("sharp").then((m) => m.default).catch((err) => {
+      console.log(`sharp unavailable, PDF photos limited to JPEG/PNG: ${err}`);
+      return null;
+    });
+  }
+  return sharpLoader;
+}
+
+async function toEmbeddableJpeg(bytes: Uint8Array): Promise<{ bytes: Uint8Array; width: number; height: number } | null> {
+  try {
+    const sharp = await loadSharp();
+    if (!sharp) throw new Error("sharp unavailable");
+    const { data, info } = await sharp(Buffer.from(bytes))
+      .rotate()
+      .resize({ width: 1600, height: 1600, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer({ resolveWithObject: true });
+    return { bytes: new Uint8Array(data), width: info.width, height: info.height };
+  } catch (err) {
+    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+    const isPng = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+    if (!isJpeg && !isPng) return null;
+    try {
+      const d = imageSize(bytes);
+      return { bytes, width: d.width || 0, height: d.height || 0 };
+    } catch {
+      return { bytes, width: 0, height: 0 };
+    }
+  }
+}
+
 // ---- PDF export of a single incident (the investigation form) ----
 // DejaVu Sans covers characters the built-in PDF fonts can't (e.g. the
 // "→" in audit entries); falls back to Helvetica if the font isn't found.
@@ -4436,37 +4476,39 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       `;
       incident.auditTrail = auditRows.map(serializeIncidentAuditEntry);
 
-      // Pull in the photo attachments so they're visible directly in the
-      // exported report, not just listed by filename.
+      // Put every image attached to the incident (photos, and images uploaded
+      // as statements) into the PDF. Each is converted to an upright JPEG
+      // (any common format, phone rotation applied, max 1600px) so it embeds
+      // reliably; anything that can't be read is listed as "available in
+      // Dynamo" instead.
       const attachmentRows = await sql`
-        SELECT * FROM incident_attachments WHERE incident_id = ${id} AND kind = 'PHOTO' ORDER BY created_at ASC
+        SELECT * FROM incident_attachments WHERE incident_id = ${id} ORDER BY created_at ASC
       `;
       const photos: EmbeddablePhoto[] = [];
       let skippedPhotoCount = 0;
+      const skipReasons: string[] = [];
       for (const a of attachmentRows as any[]) {
-        const type = docxImageType(a.content_type);
-        if (!type) {
-          skippedPhotoCount++;
-          continue;
-        }
+        const looksLikeImage = a.kind === "PHOTO" || String(a.content_type || "").startsWith("image/")
+          || /\.(jpe?g|png|gif|bmp|webp|tiff?|heic|heif|avif)$/i.test(a.file_name || "");
+        if (!looksLikeImage) continue; // documents (e.g. PDF statements) aren't images
         try {
-          const arrayBuf = await storageRead(a.file_key);
-          const bytes = new Uint8Array(arrayBuf);
-          let width = 0;
-          let height = 0;
-          try {
-            const dims = imageSize(bytes);
-            width = dims.width || 0;
-            height = dims.height || 0;
-          } catch (dimErr) {
-            console.log(`Could not read dimensions for ${a.file_key}: ${dimErr}`);
+          const bytes = new Uint8Array(await storageRead(a.file_key));
+          const img = await toEmbeddableJpeg(bytes);
+          if (img) {
+            photos.push({ fileName: a.file_name, type: "jpg", bytes: img.bytes, width: img.width, height: img.height });
+          } else {
+            skippedPhotoCount++;
+            skipReasons.push(`${a.file_name} (unsupported image format)`);
           }
-          photos.push({ fileName: a.file_name, type, bytes, width, height });
         } catch (err) {
-          console.log(`Failed to load photo ${a.file_key} for export: ${err}`);
           skippedPhotoCount++;
+          skipReasons.push(`${a.file_name} (could not load: ${err})`);
         }
       }
+      console.log(
+        `PDF export ${incident.ref}: ${photos.length} image(s) embedded` +
+          (skipReasons.length ? `, ${skipReasons.length} not shown: ${skipReasons.join("; ")}` : "")
+      );
 
       await logIncidentAudit(id, auth, "EXPORTED", `PDF exported by ${auth.name}`);
       const buf = await buildIncidentPdf(incident, photos, skippedPhotoCount);
