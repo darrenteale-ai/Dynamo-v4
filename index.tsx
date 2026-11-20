@@ -114,7 +114,7 @@ async function snapshotDatabase() {
     "users", "incidents", "incident_audit_log", "incident_attachments", "corrective_actions",
     "safety_alerts", "safety_alert_acks", "app_settings", "case_notes", "case_note_entries", "gdpr_log",
     "vehicles", "vdi_checks", "vehicle_defects", "assets", "asset_issues",
-    "drug_bags", "drug_bag_movements", "drug_bag_events",
+    "drug_bags", "drug_bag_movements", "drug_bag_events", "med_items", "med_batches", "med_movements",
   ];
   const out: Record<string, any[]> = {};
   for (const t of tables) out[t] = (await sql.unsafe(`SELECT * FROM ${t}`)) as any[];
@@ -323,6 +323,15 @@ async function runDigest(): Promise<{ recipientCount: number; emailSent: boolean
     `RIDDOR reports overdue: ${riddorOverdue.length}`,
     `CQC notifications not yet sent: ${cqcOutstanding.length}`,
     `Duty of candour outstanding: ${candourOutstanding.length}`,
+    ...(await (async () => {
+      try {
+        const st = await medStoreSummary();
+        return [
+          `Medicines below minimum stock: ${st.lowStock} (out of stock: ${st.outOfStock})`,
+          `Medicine batches expired: ${st.expiredBatches} (expiring in 30 days: ${st.expiringSoonBatches})`,
+        ];
+      } catch { return []; }
+    })()),
     `Overdue corrective actions: ${overdueActions.length}`,
     `Active safety alerts: ${unackedAlerts}`,
   ];
@@ -769,6 +778,50 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+
+  // ---- Medication store: stock items, batches (expiry + qty), movements ----
+  await sql`
+    CREATE TABLE IF NOT EXISTS med_items (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      strength TEXT,
+      form TEXT,
+      unit TEXT NOT NULL DEFAULT 'units',
+      min_qty INTEGER NOT NULL DEFAULT 0,
+      location TEXT,
+      notes TEXT,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS med_batches (
+      id SERIAL PRIMARY KEY,
+      item_id INTEGER NOT NULL REFERENCES med_items(id) ON DELETE CASCADE,
+      batch_number TEXT,
+      expiry_date DATE NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+      received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS med_batches_item ON med_batches (item_id, expiry_date)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS med_movements (
+      id SERIAL PRIMARY KEY,
+      item_id INTEGER NOT NULL REFERENCES med_items(id) ON DELETE CASCADE,
+      batch_id INTEGER REFERENCES med_batches(id) ON DELETE SET NULL,
+      type TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      reason TEXT,
+      reference TEXT,
+      actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      actor_name TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS med_movements_item ON med_movements (item_id, created_at DESC)`;
 
   // ---- Company assets ----
   await sql`
@@ -3893,6 +3946,321 @@ async function handleMedicationRequest(req: Request, url: URL, path: string, met
   return json({ error: "Not found" }, 404);
 }
 
+// =====================================================================
+// Medication store: stock items with a minimum quantity, held in batches
+// (each with its own expiry date and quantity). Stock is received, issued
+// (earliest expiry first, never from expired batches), disposed of or
+// recounted; every change is a movement with who, why and the new balance.
+// Note: this is stock control, not a controlled drugs register.
+// =====================================================================
+
+const MED_MOVEMENT_LABEL: Record<string, string> = {
+  RECEIVED: "Received",
+  ISSUED: "Issued",
+  DISPOSED: "Disposed",
+  ADJUSTED: "Stock count adjustment",
+};
+
+function cleanQty(v: any): number | null {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n >= 0 && n <= 1000000 ? n : null;
+}
+
+async function medItemRows(id: number | null, includeArchived: boolean) {
+  return await sql`
+    SELECT i.*,
+      COALESCE((SELECT SUM(b.quantity) FROM med_batches b WHERE b.item_id = i.id), 0)::int AS total_qty,
+      COALESCE((SELECT SUM(b.quantity) FROM med_batches b WHERE b.item_id = i.id AND b.expiry_date >= CURRENT_DATE), 0)::int AS usable_qty,
+      (SELECT MIN(b.expiry_date) FROM med_batches b WHERE b.item_id = i.id AND b.quantity > 0) AS earliest_expiry,
+      COALESCE((SELECT json_agg(json_build_object('id', b.id, 'batchNumber', b.batch_number, 'expiryDate', b.expiry_date,
+        'quantity', b.quantity, 'receivedAt', b.received_at) ORDER BY b.expiry_date)
+        FROM med_batches b WHERE b.item_id = i.id AND b.quantity > 0), '[]'::json) AS batches
+    FROM med_items i
+    WHERE (${id}::int IS NULL OR i.id = ${id})
+      AND (${includeArchived} OR i.active = TRUE OR ${id}::int IS NOT NULL)
+    ORDER BY i.active DESC, lower(i.name), i.strength NULLS FIRST
+  `;
+}
+
+function serializeMedItem(row: any) {
+  const total = Number(row.total_qty || 0);
+  const usable = Number(row.usable_qty || 0);
+  const minQty = Number(row.min_qty || 0);
+  const batches = (row.batches || []).map((b: any) => ({
+    ...b,
+    expiryDate: toDateStr(b.expiryDate),
+    expiryStatus: dueStatus(b.expiryDate),
+  }));
+  return {
+    id: row.id,
+    name: row.name,
+    strength: row.strength,
+    form: row.form,
+    unit: row.unit,
+    minQty,
+    location: row.location,
+    notes: row.notes,
+    active: row.active,
+    totalQty: total,
+    usableQty: usable, // excludes expired batches
+    expiredQty: total - usable,
+    earliestExpiry: toDateStr(row.earliest_expiry),
+    expiryStatus: dueStatus(row.earliest_expiry),
+    // Stock level is judged on in-date stock only.
+    stockStatus: usable === 0 ? "OUT" : usable < minQty ? "LOW" : "OK",
+    batches,
+  };
+}
+
+async function getMedItem(id: number) {
+  const [row] = await medItemRows(id, true);
+  return row ? serializeMedItem(row) : null;
+}
+
+function serializeMedMovement(row: any) {
+  return {
+    id: row.id,
+    itemId: row.item_id,
+    itemName: row.item_name,
+    itemStrength: row.item_strength,
+    unit: row.unit,
+    batchId: row.batch_id,
+    batchNumber: row.batch_number,
+    expiryDate: toDateStr(row.expiry_date),
+    type: row.type,
+    typeLabel: MED_MOVEMENT_LABEL[row.type] || row.type,
+    quantity: row.quantity,
+    balanceAfter: row.balance_after,
+    reason: row.reason,
+    reference: row.reference,
+    actorName: row.actor_name,
+    createdAt: row.created_at,
+  };
+}
+
+async function listMedMovements(itemId: number | null, limit: number) {
+  return await sql`
+    SELECT m.*, i.name AS item_name, i.strength AS item_strength, i.unit, b.batch_number, b.expiry_date
+    FROM med_movements m
+    JOIN med_items i ON i.id = m.item_id
+    LEFT JOIN med_batches b ON b.id = m.batch_id
+    WHERE (${itemId}::int IS NULL OR m.item_id = ${itemId})
+    ORDER BY m.created_at DESC, m.id DESC
+    LIMIT ${limit}
+  `;
+}
+
+async function medItemTotal(tx: any, itemId: number): Promise<number> {
+  const [r] = await tx`SELECT COALESCE(SUM(quantity), 0)::int AS t FROM med_batches WHERE item_id = ${itemId}`;
+  return Number(r.t);
+}
+
+async function medStoreSummary() {
+  const items = ((await medItemRows(null, false)) as any[]).map(serializeMedItem);
+  const batches = items.flatMap((i) => i.batches);
+  return {
+    items: items.length,
+    lowStock: items.filter((i) => i.stockStatus === "LOW").length,
+    outOfStock: items.filter((i) => i.stockStatus === "OUT").length,
+    expiredBatches: batches.filter((b) => b.expiryStatus === "OVERDUE").length,
+    expiringSoonBatches: batches.filter((b) => b.expiryStatus === "DUE_SOON").length,
+  };
+}
+
+async function handleMedStoreRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+  if (!path.startsWith("/api/med-store")) return null;
+  const auth = await getAuth(req);
+  if (!auth) return json({ error: "Unauthorized" }, 401);
+  if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+  const actor = { id: auth.sub, name: auth.name };
+
+  if (path === "/api/med-store/summary" && method === "GET") return json(await medStoreSummary());
+
+  if (path === "/api/med-store/items" && method === "GET") {
+    return json(((await medItemRows(null, url.searchParams.get("archived") === "1")) as any[]).map(serializeMedItem));
+  }
+
+  if (path === "/api/med-store/movements" && method === "GET") {
+    return json(((await listMedMovements(null, 500)) as any[]).map(serializeMedMovement));
+  }
+
+  if (path === "/api/med-store/items" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const name = cleanText(body.name, 120);
+    if (!name) return json({ error: "Enter the medicine name." }, 400);
+    const minQty = cleanQty(body.minQty ?? 0);
+    if (minQty === null) return json({ error: "Minimum quantity must be 0 or more." }, 400);
+    const strength = cleanText(body.strength, 60);
+    const [dup] = await sql`
+      SELECT id FROM med_items WHERE lower(name) = lower(${name}) AND COALESCE(lower(strength), '') = COALESCE(lower(${strength}), '') AND active
+    `;
+    if (dup) return json({ error: `${name}${strength ? " " + strength : ""} is already in the store.` }, 400);
+    const initialQty = body.initialQty === "" || body.initialQty == null ? 0 : cleanQty(body.initialQty);
+    const initialExpiry = cleanDate(body.initialExpiry);
+    if (initialQty === null) return json({ error: "Opening quantity must be 0 or more." }, 400);
+    if (initialQty > 0 && !initialExpiry) return json({ error: "Enter the expiry date for the opening stock." }, 400);
+    const id = await sql.begin(async (tx: any) => {
+      const [row] = await tx`
+        INSERT INTO med_items (name, strength, form, unit, min_qty, location, notes)
+        VALUES (${name}, ${strength}, ${cleanText(body.form, 60)}, ${cleanText(body.unit, 30) || "units"}, ${minQty},
+          ${cleanText(body.location, 80)}, ${cleanText(body.notes, 1000)})
+        RETURNING id
+      `;
+      if (initialQty > 0) {
+        const [b] = await tx`
+          INSERT INTO med_batches (item_id, batch_number, expiry_date, quantity)
+          VALUES (${row.id}, ${cleanText(body.initialBatch, 60)}, ${initialExpiry}, ${initialQty}) RETURNING id
+        `;
+        await tx`
+          INSERT INTO med_movements (item_id, batch_id, type, quantity, balance_after, reason, actor_id, actor_name)
+          VALUES (${row.id}, ${b.id}, 'RECEIVED', ${initialQty}, ${initialQty}, 'Opening stock', ${actor.id}, ${actor.name})
+        `;
+      }
+      return row.id;
+    });
+    return json(await getMedItem(id), 201);
+  }
+
+  const bm = path.match(/^\/api\/med-store\/batches\/(\d+)\/(dispose|count)$/);
+  if (bm && method === "POST") {
+    const batchId = Number(bm[1]);
+    const op = bm[2];
+    const body = await req.json().catch(() => ({}));
+    const reason = cleanText(body.reason, 200);
+    try {
+      const itemId = await sql.begin(async (tx: any) => {
+        const [batch] = await tx`SELECT * FROM med_batches WHERE id = ${batchId} FOR UPDATE`;
+        if (!batch) throw new Error("Batch not found");
+        if (op === "dispose") {
+          const qty = cleanQty(body.quantity);
+          if (!qty) throw new Error("Enter how many to dispose of.");
+          if (qty > batch.quantity) throw new Error(`Only ${batch.quantity} left in this batch.`);
+          if (!reason) throw new Error("Choose a reason for disposal.");
+          await tx`UPDATE med_batches SET quantity = quantity - ${qty} WHERE id = ${batchId}`;
+          const bal = await medItemTotal(tx, batch.item_id);
+          await tx`
+            INSERT INTO med_movements (item_id, batch_id, type, quantity, balance_after, reason, reference, actor_id, actor_name)
+            VALUES (${batch.item_id}, ${batchId}, 'DISPOSED', ${-qty}, ${bal}, ${reason}, ${cleanText(body.reference, 120)}, ${actor.id}, ${actor.name})
+          `;
+        } else {
+          const counted = cleanQty(body.countedQty);
+          if (counted === null) throw new Error("Enter the quantity counted.");
+          const diff = counted - batch.quantity;
+          if (diff === 0) throw new Error("The count matches the system — nothing to adjust.");
+          if (!reason) throw new Error("Give a reason for the difference.");
+          await tx`UPDATE med_batches SET quantity = ${counted} WHERE id = ${batchId}`;
+          const bal = await medItemTotal(tx, batch.item_id);
+          await tx`
+            INSERT INTO med_movements (item_id, batch_id, type, quantity, balance_after, reason, actor_id, actor_name)
+            VALUES (${batch.item_id}, ${batchId}, 'ADJUSTED', ${diff}, ${bal}, ${`Stock count: system ${batch.quantity}, counted ${counted}. ${reason}`}, ${actor.id}, ${actor.name})
+          `;
+        }
+        return batch.item_id;
+      });
+      return json(await getMedItem(itemId));
+    } catch (err: any) {
+      return json({ error: err.message || "Failed" }, 400);
+    }
+  }
+
+  const im = path.match(/^\/api\/med-store\/items\/(\d+)(\/(receive|issue|movements))?$/);
+  if (!im) return json({ error: "Not found" }, 404);
+  const id = Number(im[1]);
+  const action = im[3] || null;
+  const item = await getMedItem(id);
+  if (!item) return json({ error: "Medicine not found" }, 404);
+
+  if (!action && method === "PUT") {
+    const body = await req.json().catch(() => ({}));
+    const name = cleanText(body.name, 120) || item.name;
+    const minQty = body.minQty === undefined ? item.minQty : cleanQty(body.minQty);
+    if (minQty === null) return json({ error: "Minimum quantity must be 0 or more." }, 400);
+    const active = body.active === false ? false : true;
+    await sql`
+      UPDATE med_items SET name = ${name}, strength = ${cleanText(body.strength, 60)}, form = ${cleanText(body.form, 60)},
+        unit = ${cleanText(body.unit, 30) || "units"}, min_qty = ${minQty}, location = ${cleanText(body.location, 80)},
+        notes = ${cleanText(body.notes, 1000)}, active = ${active}, updated_at = now()
+      WHERE id = ${id}
+    `;
+    return json(await getMedItem(id));
+  }
+
+  if (action === "movements" && method === "GET") {
+    return json(((await listMedMovements(id, 500)) as any[]).map(serializeMedMovement));
+  }
+
+  if (action === "receive" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const qty = cleanQty(body.quantity);
+    const expiry = cleanDate(body.expiryDate);
+    if (!qty) return json({ error: "Enter the quantity received." }, 400);
+    if (!expiry) return json({ error: "Enter the expiry date." }, 400);
+    if (dueStatus(expiry) === "OVERDUE") return json({ error: "That expiry date is in the past — don't accept expired stock." }, 400);
+    const batchNumber = cleanText(body.batchNumber, 60);
+    await sql.begin(async (tx: any) => {
+      // Same batch number and expiry tops up the existing batch.
+      const [existing] = await tx`
+        SELECT id FROM med_batches WHERE item_id = ${id} AND expiry_date = ${expiry}
+          AND COALESCE(batch_number, '') = COALESCE(${batchNumber}, '') FOR UPDATE
+      `;
+      let batchId: number;
+      if (existing) {
+        await tx`UPDATE med_batches SET quantity = quantity + ${qty} WHERE id = ${existing.id}`;
+        batchId = existing.id;
+      } else {
+        const [b] = await tx`
+          INSERT INTO med_batches (item_id, batch_number, expiry_date, quantity) VALUES (${id}, ${batchNumber}, ${expiry}, ${qty}) RETURNING id
+        `;
+        batchId = b.id;
+      }
+      const bal = await medItemTotal(tx, id);
+      await tx`
+        INSERT INTO med_movements (item_id, batch_id, type, quantity, balance_after, reason, reference, actor_id, actor_name)
+        VALUES (${id}, ${batchId}, 'RECEIVED', ${qty}, ${bal}, ${cleanText(body.reason, 200) || "Stock received"},
+          ${cleanText(body.reference, 120)}, ${actor.id}, ${actor.name})
+      `;
+    });
+    return json(await getMedItem(id));
+  }
+
+  if (action === "issue" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const qty = cleanQty(body.quantity);
+    const reason = cleanText(body.reason, 200);
+    if (!qty) return json({ error: "Enter the quantity to issue." }, 400);
+    if (!reason) return json({ error: "Choose what the stock is for." }, 400);
+    const reference = cleanText(body.reference, 120);
+    try {
+      await sql.begin(async (tx: any) => {
+        // Earliest expiry first, never from expired batches.
+        const batches = await tx`
+          SELECT * FROM med_batches WHERE item_id = ${id} AND quantity > 0 AND expiry_date >= CURRENT_DATE
+          ORDER BY expiry_date ASC, id ASC FOR UPDATE
+        `;
+        const available = (batches as any[]).reduce((n, b) => n + b.quantity, 0);
+        if (qty > available) throw new Error(`Only ${available} ${item.unit} in date and in stock.`);
+        let left = qty;
+        for (const b of batches as any[]) {
+          if (left <= 0) break;
+          const take = Math.min(left, b.quantity);
+          await tx`UPDATE med_batches SET quantity = quantity - ${take} WHERE id = ${b.id}`;
+          left -= take;
+          const bal = await medItemTotal(tx, id);
+          await tx`
+            INSERT INTO med_movements (item_id, batch_id, type, quantity, balance_after, reason, reference, actor_id, actor_name)
+            VALUES (${id}, ${b.id}, 'ISSUED', ${-take}, ${bal}, ${reason}, ${reference}, ${actor.id}, ${actor.name})
+          `;
+        }
+      });
+    } catch (err: any) {
+      return json({ error: err.message || "Failed to issue stock" }, 400);
+    }
+    return json(await getMedItem(id));
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
 async function handleFleetRequest(req: Request, url: URL, path: string, method: string, ip: string): Promise<Response | null> {
   // ---- Public (no login): the crew VDI form ----
   if (path === "/api/public/vdi/setup" && method === "GET") {
@@ -4216,6 +4584,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     }
     const gdprResponse = await handleGdprRequest(req, url, path, method);
     if (gdprResponse) return gdprResponse;
+    const medStoreResponse = await handleMedStoreRequest(req, url, path, method);
+    if (medStoreResponse) return medStoreResponse;
     const medicationResponse = await handleMedicationRequest(req, url, path, method);
     if (medicationResponse) return medicationResponse;
     const fleetResponse = await handleFleetRequest(req, url, path, method, ip);

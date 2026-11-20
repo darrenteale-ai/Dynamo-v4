@@ -592,6 +592,16 @@ const api = {
   getSafetyAlertAcks: (id) => request(`/safety-alerts/${id}/acks`),
   archiveSafetyAlert: (id) => request(`/safety-alerts/${id}`, { method: 'PUT', body: { active: false } }),
   runDigest: () => request('/digest/run', { method: 'POST' }),
+  getMedStoreSummary: () => request('/med-store/summary'),
+  listMedItems: (archived) => request('/med-store/items', { params: { archived: archived ? 1 : undefined } }),
+  createMedItem: (data) => request('/med-store/items', { method: 'POST', body: data }),
+  updateMedItem: (id, data) => request(`/med-store/items/${id}`, { method: 'PUT', body: data }),
+  receiveMedStock: (id, data) => request(`/med-store/items/${id}/receive`, { method: 'POST', body: data }),
+  issueMedStock: (id, data) => request(`/med-store/items/${id}/issue`, { method: 'POST', body: data }),
+  disposeMedBatch: (batchId, data) => request(`/med-store/batches/${batchId}/dispose`, { method: 'POST', body: data }),
+  countMedBatch: (batchId, data) => request(`/med-store/batches/${batchId}/count`, { method: 'POST', body: data }),
+  listMedItemMovements: (id) => request(`/med-store/items/${id}/movements`),
+  listMedMovements: () => request('/med-store/movements'),
   getMedicationSummary: () => request('/medication/summary'),
   listDrugBags: (archived) => request('/medication/bags', { params: { archived: archived ? 1 : undefined } }),
   createDrugBag: (data) => request('/medication/bags', { method: 'POST', body: data }),
@@ -756,6 +766,7 @@ function buildNav(isAdmin) {
   if (isAdmin) {
     nav.push({ section: 'MEDICATION', items: [
       { to: '/medication', label: 'Drug Bag Sign In / Sign Out', icon: '💊' },
+      { to: '/medication-store', label: 'Medication Store', icon: '📦' },
     ] });
   }
   if (isAdmin) {
@@ -778,6 +789,7 @@ function Layout({ children }) {
   const NAV = buildNav(isMgrOrAdmin(user?.role));
   const location = useLocation();
   const pageTitle = location.pathname.startsWith('/fleet') ? 'Fleet Management'
+    : location.pathname.startsWith('/medication-store') ? 'Medication Store'
     : location.pathname.startsWith('/medication') ? 'Medication' : 'Incident Reporting';
 
   return (
@@ -5444,6 +5456,622 @@ function DrugBagModal({ bag, onClose, onSaved, onSignOut, onReturn, onRestock })
   );
 }
 
+// =====================================================================
+// Medication store: stock levels, batches with expiry dates, minimums.
+// =====================================================================
+
+const MED_FORMS = ['Tablet', 'Capsule', 'Ampoule', 'Vial', 'Pre-filled syringe', 'Nebule', 'Inhaler', 'Oral solution', 'Suppository', 'Gel', 'Spray', 'Infusion bag', 'Other'];
+const MED_ISSUE_REASONS = ['Drug bag restock', 'Used on patient', 'Transferred to another site', 'Other'];
+const MED_DISPOSE_REASONS = ['Expired', 'Damaged', 'Contaminated / opened', 'Recalled', 'Other'];
+
+// Short dd/mm/yyyy dates keep the stock tables compact.
+function fmtShort(d) {
+  if (!d) return '';
+  const x = new Date(d);
+  return isNaN(x.getTime()) ? '' : x.toLocaleDateString('en-GB');
+}
+
+function medLabel(i) {
+  return [i.name, i.strength, i.form].filter(Boolean).join(' ');
+}
+
+function expiryBadge(date, status) {
+  if (!date) return <span className="muted">—</span>;
+  const cls = status === 'OVERDUE' ? 'badge-red' : status === 'DUE_SOON' ? 'badge-amber' : null;
+  return cls
+    ? <span className={'badge ' + cls} style={{ whiteSpace: 'nowrap' }}>{fmtShort(date)}{status === 'OVERDUE' ? ' — expired' : ''}</span>
+    : <span style={{ whiteSpace: 'nowrap' }}>{fmtShort(date)}</span>;
+}
+
+function stockBadge(i) {
+  if (i.stockStatus === 'OUT') return <span className="badge badge-red">Out of stock</span>;
+  if (i.stockStatus === 'LOW') return <span className="badge badge-amber">Below minimum</span>;
+  return <span className="badge badge-green">OK</span>;
+}
+
+function MedicationStore() {
+  const [tab, setTab] = useState('stock');
+  const [summary, setSummary] = useState(null);
+  const [items, setItems] = useState([]);
+  const [movements, setMovements] = useState([]);
+  const [bags, setBags] = useState([]);
+  const [q, setQ] = useState('');
+  const [onlyAttention, setOnlyAttention] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [editing, setEditing] = useState(null); // item | 'new'
+  const [viewing, setViewing] = useState(null);
+  const [receiving, setReceiving] = useState(null);
+  const [issuing, setIssuing] = useState(null);
+
+  function loadAll() {
+    setError('');
+    return Promise.all([
+      api.getMedStoreSummary().then(setSummary),
+      api.listMedItems(showArchived).then((rows) => {
+        setItems(rows);
+        setViewing((v) => (v ? rows.find((r) => r.id === v.id) || null : v));
+      }),
+      api.listMedMovements().then(setMovements),
+      api.listDrugBags(false).then(setBags).catch(() => {}),
+    ])
+      .catch((err) => setError(err.message || 'Failed to load the medication store'))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived]);
+
+  function done(message, keepViewing) {
+    setEditing(null); setReceiving(null); setIssuing(null);
+    if (!keepViewing) setViewing(null);
+    if (message) setNotice(message);
+    loadAll();
+  }
+
+  if (loading) return <div className="page-loading">Loading…</div>;
+
+  const needle = q.trim().toLowerCase();
+  const shown = items.filter((i) => {
+    if (needle && !medLabel(i).toLowerCase().includes(needle) && !(i.location || '').toLowerCase().includes(needle)) return false;
+    if (onlyAttention && i.stockStatus === 'OK' && !['OVERDUE', 'DUE_SOON'].includes(i.expiryStatus)) return false;
+    return true;
+  });
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Medication Store</h1>
+          <div className="page-sub">Stock held, expiry dates by batch, and minimum stock levels</div>
+        </div>
+        <div className="page-header-actions">
+          <button className="btn btn-primary" onClick={() => setEditing('new')}>+ Add medicine</button>
+        </div>
+      </div>
+
+      {error && <div className="error-banner" style={{ marginBottom: 12 }}>{error}</div>}
+      {notice && (
+        <div className="success-banner" style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+          <span>{notice}</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setNotice('')}>Dismiss</button>
+        </div>
+      )}
+
+      {summary && (
+        <div className="kpi-grid">
+          <div className="kpi-card">
+            <div className="kpi-value">{summary.items}</div>
+            <div className="kpi-label">Medicines stocked</div>
+            <div className="kpi-sub">Lines in the store</div>
+          </div>
+          <div className={'kpi-card ' + (summary.lowStock || summary.outOfStock ? 'kpi-card-amber' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.lowStock + summary.outOfStock}</div>
+            <div className="kpi-label">Below minimum</div>
+            <div className="kpi-sub">{summary.outOfStock} out of stock</div>
+          </div>
+          <div className={'kpi-card ' + (summary.expiredBatches ? 'kpi-card-red' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.expiredBatches}</div>
+            <div className="kpi-label">Expired batches</div>
+            <div className="kpi-sub">Remove and dispose of</div>
+          </div>
+          <div className={'kpi-card ' + (summary.expiringSoonBatches ? 'kpi-card-amber' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.expiringSoonBatches}</div>
+            <div className="kpi-label">Expiring in 30 days</div>
+            <div className="kpi-sub">Use these first</div>
+          </div>
+        </div>
+      )}
+
+      <div className="tabs">
+        <button className={'tab-btn' + (tab === 'stock' ? ' active' : '')} onClick={() => setTab('stock')}>Stock</button>
+        <button className={'tab-btn' + (tab === 'history' ? ' active' : '')} onClick={() => setTab('history')}>Stock movements</button>
+      </div>
+
+      {tab === 'stock' && (
+        <div className="card table-card">
+          <div style={{ padding: '10px 16px', display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search medicine or location…" style={{ maxWidth: 280 }} />
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+              <input type="checkbox" checked={onlyAttention} onChange={(e) => setOnlyAttention(e.target.checked)} />
+              Needs attention only (low stock or expiring)
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, marginLeft: 'auto' }}>
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              Show archived
+            </label>
+          </div>
+          {shown.length === 0 ? (
+            <div className="empty">{items.length ? 'No medicines match.' : 'No medicines yet. Use “+ Add medicine” to start your stock list.'}</div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr><th>Medicine</th><th>In stock</th><th>Min qty</th><th>Earliest expiry</th><th>Status</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {shown.map((i) => (
+                    <tr key={i.id} className="row-clickable" onClick={() => setViewing(i)} style={i.active ? undefined : { opacity: 0.55 }}>
+                      <td>
+                        <div className="ref-link">{i.name}{i.strength ? ` ${i.strength}` : ''}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>{[i.form, i.location].filter(Boolean).join(' · ') || '—'}{!i.active ? ' · archived' : ''}</div>
+                      </td>
+                      <td>
+                        <strong>{i.usableQty}</strong> {i.unit}
+                        {i.expiredQty > 0 && <div style={{ fontSize: 12, color: 'var(--red)' }}>+ {i.expiredQty} expired</div>}
+                        {i.batches.length > 1 && <div className="muted" style={{ fontSize: 12 }}>{i.batches.length} batches</div>}
+                      </td>
+                      <td>{i.minQty}</td>
+                      <td>{expiryBadge(i.earliestExpiry, i.expiryStatus)}</td>
+                      <td>{stockBadge(i)}</td>
+                      <td onClick={(e) => e.stopPropagation()} style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
+                        {i.active && <button className="btn btn-ghost btn-sm" onClick={() => setReceiving(i)}>Receive</button>}{' '}
+                        {i.active && <button className="btn btn-primary btn-sm" onClick={() => setIssuing(i)} disabled={!i.usableQty}>Issue</button>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'history' && <MedMovementsTable movements={movements} showItem />}
+
+      {editing && (
+        <MedItemModal item={editing === 'new' ? null : editing} onClose={() => setEditing(null)}
+          onSaved={(it, isNew) => done(isNew ? `${medLabel(it)} added to the store.` : `${medLabel(it)} updated.`)} />
+      )}
+      {viewing && !editing && !receiving && !issuing && (
+        <MedItemDetailModal item={viewing} onClose={() => setViewing(null)}
+          onEdit={() => setEditing(viewing)} onReceive={() => setReceiving(viewing)} onIssue={() => setIssuing(viewing)}
+          onChanged={(msg) => done(msg, true)} />
+      )}
+      {receiving && (
+        <ReceiveMedModal item={receiving} onClose={() => setReceiving(null)}
+          onSaved={(it, qty) => done(`Received ${qty} ${it.unit} of ${medLabel(it)}. Now ${it.usableQty} in stock.`, true)} />
+      )}
+      {issuing && (
+        <IssueMedModal item={issuing} bags={bags} onClose={() => setIssuing(null)}
+          onSaved={(it, qty) => done(`Issued ${qty} ${it.unit} of ${medLabel(it)}. ${it.usableQty} left${it.stockStatus !== 'OK' ? ' — below minimum' : ''}.`, true)} />
+      )}
+    </div>
+  );
+}
+
+function MedMovementsTable({ movements, showItem }) {
+  if (!movements.length) return <div className="card"><div className="empty">No stock movements yet.</div></div>;
+  return (
+    <div className="card table-card">
+      <div style={{ overflowX: 'auto' }}>
+        <table className="table">
+          <thead>
+            <tr><th>Date</th>{showItem && <th>Medicine</th>}<th>Movement</th><th>Qty</th><th>Batch / expiry</th><th>Balance</th><th>Reason / reference</th><th>By</th></tr>
+          </thead>
+          <tbody>
+            {movements.map((m) => (
+              <tr key={m.id}>
+                <td style={{ whiteSpace: 'nowrap' }}>{fmtShort(m.createdAt)} {fmtTime(m.createdAt)}</td>
+                {showItem && <td>{m.itemName}{m.itemStrength ? ` ${m.itemStrength}` : ''}</td>}
+                <td>{m.typeLabel}</td>
+                <td style={{ fontWeight: 600, color: m.quantity < 0 ? 'var(--red)' : 'var(--green, #15803d)' }}>{m.quantity > 0 ? '+' : ''}{m.quantity}</td>
+                <td>{m.batchNumber || '—'}{m.expiryDate ? <div className="muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>exp {fmtShort(m.expiryDate)}</div> : null}</td>
+                <td>{m.balanceAfter} {m.unit}</td>
+                <td>{m.reason || '—'}{m.reference ? <div className="muted" style={{ fontSize: 12 }}>{m.reference}</div> : null}</td>
+                <td>{m.actorName || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function MedItemModal({ item, onClose, onSaved }) {
+  const isNew = !item;
+  const [name, setName] = useState(item?.name || '');
+  const [strength, setStrength] = useState(item?.strength || '');
+  const [form, setForm] = useState(item?.form || '');
+  const [unit, setUnit] = useState(item?.unit || 'units');
+  const [minQty, setMinQty] = useState(item ? String(item.minQty) : '0');
+  const [location, setLocation] = useState(item?.location || '');
+  const [notes, setNotes] = useState(item?.notes || '');
+  const [initialQty, setInitialQty] = useState('');
+  const [initialExpiry, setInitialExpiry] = useState('');
+  const [initialBatch, setInitialBatch] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function save(extra = {}) {
+    setError('');
+    setBusy(true);
+    try {
+      const data = { name, strength, form, unit, minQty, location, notes, ...extra };
+      const saved = isNew
+        ? await api.createMedItem({ ...data, initialQty, initialExpiry: initialExpiry || null, initialBatch })
+        : await api.updateMedItem(item.id, data);
+      onSaved(saved, isNew);
+    } catch (err) {
+      setError(err.message || 'Failed to save');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={(e) => { e.preventDefault(); save(); }} style={{ maxWidth: 620 }}>
+        <div className="modal-header">
+          <h2>{isNew ? 'Add a medicine' : `Edit ${medLabel(item)}`}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Medicine name <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Paracetamol" required autoFocus />
+          </div>
+          <div className="form-field">
+            <label>Strength</label>
+            <input value={strength} onChange={(e) => setStrength(e.target.value)} placeholder="e.g. 500mg, 1mg/10ml" />
+          </div>
+          <div className="form-field">
+            <label>Form</label>
+            <select value={form} onChange={(e) => setForm(e.target.value)}>
+              <option value="">—</option>
+              {MED_FORMS.map((f) => <option key={f} value={f}>{f}</option>)}
+            </select>
+          </div>
+          <div className="form-field">
+            <label>Counted in</label>
+            <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="e.g. tablets, ampoules, packs" />
+          </div>
+          <div className="form-field">
+            <label>Minimum quantity <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input type="number" min="0" value={minQty} onChange={(e) => setMinQty(e.target.value)} required />
+          </div>
+          <div className="form-field">
+            <label>Location</label>
+            <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="e.g. Luton Base, cabinet 2" />
+          </div>
+          {isNew && (
+            <>
+              <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+                <div className="settings-section-title" style={{ marginTop: 6 }}>Opening stock (optional)</div>
+              </div>
+              <div className="form-field">
+                <label>Quantity in stock now</label>
+                <input type="number" min="0" value={initialQty} onChange={(e) => setInitialQty(e.target.value)} />
+              </div>
+              <div className="form-field">
+                <label>Expiry date{Number(initialQty) > 0 ? <span style={{ color: 'var(--red)' }}> *</span> : ''}</label>
+                <input type="date" value={initialExpiry} onChange={(e) => setInitialExpiry(e.target.value)} required={Number(initialQty) > 0} />
+              </div>
+              <div className="form-field">
+                <label>Batch number</label>
+                <input value={initialBatch} onChange={(e) => setInitialBatch(e.target.value)} />
+              </div>
+            </>
+          )}
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <label>Notes</label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div>
+            {!isNew && item.active && (
+              <button type="button" className="btn btn-ghost" disabled={busy}
+                onClick={() => { if (confirm(`Archive ${medLabel(item)}? It will be hidden from the stock list. Its history is kept.`)) save({ active: false }); }}>Archive</button>
+            )}
+            {!isNew && !item.active && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => save({ active: true })}>Restore</button>}
+          </div>
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : isNew ? 'Add medicine' : 'Save changes'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function MedItemDetailModal({ item, onClose, onEdit, onReceive, onIssue, onChanged }) {
+  const [movements, setMovements] = useState(null);
+  const [batchAction, setBatchAction] = useState(null); // { batch, op: 'dispose' | 'count' }
+
+  useEffect(() => {
+    api.listMedItemMovements(item.id).then(setMovements).catch(() => setMovements([]));
+  }, [item]);
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="modal" onMouseDown={(e) => e.stopPropagation()} style={{ maxWidth: 'none', width: 'min(1000px, 95vw)' }}>
+        <div className="modal-header">
+          <h2>{medLabel(item)}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+          {stockBadge(item)}
+          <span><strong>{item.usableQty}</strong> {item.unit} in date · minimum {item.minQty}</span>
+          {item.expiredQty > 0 && <span style={{ color: 'var(--red)' }}>{item.expiredQty} expired — dispose of</span>}
+          {item.location && <span className="muted">· {item.location}</span>}
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            <button className="btn btn-ghost btn-sm" onClick={onEdit}>Edit details</button>
+            {item.active && <button className="btn btn-ghost btn-sm" onClick={onReceive}>Receive stock</button>}
+            {item.active && <button className="btn btn-primary btn-sm" onClick={onIssue} disabled={!item.usableQty}>Issue stock</button>}
+          </div>
+        </div>
+
+        <div className="settings-section-title">Batches in stock</div>
+        {item.batches.length === 0 ? <div className="muted" style={{ marginBottom: 12 }}>No stock held.</div> : (
+          <div style={{ overflowX: 'auto', marginBottom: 12 }}><table className="table">
+            <thead><tr><th>Batch</th><th>Expiry</th><th>Quantity</th><th>Received</th><th></th></tr></thead>
+            <tbody>
+              {item.batches.map((b) => (
+                <tr key={b.id}>
+                  <td>{b.batchNumber || <span className="muted">—</span>}</td>
+                  <td>{expiryBadge(b.expiryDate, b.expiryStatus)}</td>
+                  <td>{b.quantity} {item.unit}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{fmtShort(b.receivedAt)}</td>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setBatchAction({ batch: b, op: 'count' })}>Stock count</button>{' '}
+                    <button className={'btn btn-sm ' + (b.expiryStatus === 'OVERDUE' ? 'btn-danger' : 'btn-ghost')} onClick={() => setBatchAction({ batch: b, op: 'dispose' })}>Dispose</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+        )}
+
+        <div className="settings-section-title">Movements</div>
+        {!movements ? <div className="muted">Loading…</div> : (
+          <div style={{ maxHeight: 300, overflowY: 'auto' }}><MedMovementsTable movements={movements} /></div>
+        )}
+
+        {batchAction && (
+          <MedBatchActionModal item={item} batch={batchAction.batch} op={batchAction.op}
+            onClose={() => setBatchAction(null)}
+            onSaved={(msg) => { setBatchAction(null); onChanged(msg); }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReceiveMedModal({ item, onClose, onSaved }) {
+  const [quantity, setQuantity] = useState('');
+  const [expiryDate, setExpiryDate] = useState('');
+  const [batchNumber, setBatchNumber] = useState('');
+  const [reference, setReference] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      onSaved(await api.receiveMedStock(item.id, { quantity, expiryDate, batchNumber, reference }), quantity);
+    } catch (err) {
+      setError(err.message || 'Failed to receive stock');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={handleSubmit} style={{ maxWidth: 520 }}>
+        <div className="modal-header">
+          <h2>Receive stock — {medLabel(item)}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Quantity received ({item.unit}) <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} required autoFocus />
+          </div>
+          <div className="form-field">
+            <label>Expiry date <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} required />
+          </div>
+          <div className="form-field">
+            <label>Batch number</label>
+            <input value={batchNumber} onChange={(e) => setBatchNumber(e.target.value)} />
+          </div>
+          <div className="form-field">
+            <label>Supplier / order reference</label>
+            <input value={reference} onChange={(e) => setReference(e.target.value)} />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Receive stock'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function IssueMedModal({ item, bags, onClose, onSaved }) {
+  const [quantity, setQuantity] = useState('');
+  const [reason, setReason] = useState(MED_ISSUE_REASONS[0]);
+  const [bagNumber, setBagNumber] = useState('');
+  const [reference, setReference] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const after = item.usableQty - (Number(quantity) || 0);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const ref = [reason === 'Drug bag restock' && bagNumber ? `Drug bag ${bagNumber}` : null, reference].filter(Boolean).join(' — ');
+      onSaved(await api.issueMedStock(item.id, { quantity, reason, reference: ref }), quantity);
+    } catch (err) {
+      setError(err.message || 'Failed to issue stock');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={handleSubmit} style={{ maxWidth: 540 }}>
+        <div className="modal-header">
+          <h2>Issue stock — {medLabel(item)}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+          {item.usableQty} {item.unit} in date. Stock is taken from the batch with the earliest expiry first; expired stock is never issued.
+        </div>
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Quantity ({item.unit}) <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input type="number" min="1" max={item.usableQty} value={quantity} onChange={(e) => setQuantity(e.target.value)} required autoFocus />
+          </div>
+          <div className="form-field">
+            <label>For <span style={{ color: 'var(--red)' }}>*</span></label>
+            <select value={reason} onChange={(e) => setReason(e.target.value)}>
+              {MED_ISSUE_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+          </div>
+          {reason === 'Drug bag restock' && (
+            <div className="form-field">
+              <label>Drug bag</label>
+              <select value={bagNumber} onChange={(e) => setBagNumber(e.target.value)}>
+                <option value="">—</option>
+                {bags.map((b) => <option key={b.id} value={b.bagNumber}>{b.bagNumber}</option>)}
+              </select>
+            </div>
+          )}
+          <div className="form-field">
+            <label>{reason === 'Used on patient' ? 'Incident / patient record reference' : 'Reference / notes'}</label>
+            <input value={reference} onChange={(e) => setReference(e.target.value)} />
+          </div>
+        </div>
+        {quantity && after >= 0 && after < item.minQty && (
+          <div className="warning-banner" style={{ marginTop: 8 }}>This leaves {after} {item.unit} — below the minimum of {item.minQty}. Reorder soon.</div>
+        )}
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Issue stock'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function MedBatchActionModal({ item, batch, op, onClose, onSaved }) {
+  const [quantity, setQuantity] = useState(op === 'dispose' ? String(batch.quantity) : '');
+  const [reason, setReason] = useState(op === 'dispose' ? (batch.expiryStatus === 'OVERDUE' ? 'Expired' : MED_DISPOSE_REASONS[0]) : '');
+  const [reference, setReference] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      if (op === 'dispose') {
+        await api.disposeMedBatch(batch.id, { quantity, reason, reference });
+        onSaved(`Disposed of ${quantity} ${item.unit} of ${medLabel(item)}.`);
+      } else {
+        await api.countMedBatch(batch.id, { countedQty: quantity, reason });
+        onSaved(`Stock count recorded for ${medLabel(item)}.`);
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to save');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose} style={{ zIndex: 1100 }}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={handleSubmit} style={{ maxWidth: 500 }}>
+        <div className="modal-header">
+          <h2>{op === 'dispose' ? 'Dispose of stock' : 'Stock count'} — {medLabel(item)}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+          Batch {batch.batchNumber || '(no number)'}, expiry {fmtShort(batch.expiryDate)} — system shows {batch.quantity} {item.unit}.
+        </div>
+        <div className="form-grid">
+          <div className="form-field">
+            <label>{op === 'dispose' ? `Quantity to dispose of (${item.unit})` : `Quantity counted (${item.unit})`} <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input type="number" min={op === 'dispose' ? 1 : 0} max={op === 'dispose' ? batch.quantity : undefined} value={quantity} onChange={(e) => setQuantity(e.target.value)} required autoFocus />
+          </div>
+          {op === 'dispose' ? (
+            <div className="form-field">
+              <label>Reason <span style={{ color: 'var(--red)' }}>*</span></label>
+              <select value={reason} onChange={(e) => setReason(e.target.value)}>
+                {MED_DISPOSE_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+          ) : (
+            <div className="form-field">
+              <label>Reason for the difference <span style={{ color: 'var(--red)' }}>*</span></label>
+              <input value={reason} onChange={(e) => setReason(e.target.value)} required />
+            </div>
+          )}
+          {op === 'dispose' && (
+            <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+              <label>Disposal reference / witness</label>
+              <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="e.g. pharmaceutical waste bin, witnessed by…" />
+            </div>
+          )}
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className={'btn ' + (op === 'dispose' ? 'btn-danger' : 'btn-primary')} disabled={busy}>{busy ? 'Saving…' : op === 'dispose' ? 'Dispose' : 'Record count'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function FleetManagement() {
   const [tab, setTab] = useState('vehicles');
   const [summary, setSummary] = useState(null);
@@ -5961,6 +6589,7 @@ function AppRoutes() {
                 <Route path="/safety-alerts" element={<SafetyAlerts />} />
                 <Route path="/fleet" element={<AdminRoute><FleetManagement /></AdminRoute>} />
                 <Route path="/medication" element={<AdminRoute><Medication /></AdminRoute>} />
+                <Route path="/medication-store" element={<AdminRoute><MedicationStore /></AdminRoute>} />
                 <Route path="/staff" element={<AdminRoute><Staff /></AdminRoute>} />
                 <Route path="/case-notes" element={<AdminRoute><CaseNotes /></AdminRoute>} />
                 <Route path="/settings" element={<Settings />} />

@@ -92,6 +92,7 @@ hr { display:none; }
 <li><strong>Corrective Actions</strong> — every open action from every incident, with owners and due dates.</li>
 <li><strong>Safety Alerts</strong> — alerts raised from incidents, which staff must read and acknowledge.</li>
 <li><strong>Drug Bag Sign In / Sign Out</strong> (under Medication) — sign drug bags out to crews, sign them back in, restock and reseal.</li>
+<li><strong>Medication Store</strong> (under Medication) — stock in hand, expiry dates by batch and minimum quantities.</li>
 <li><strong>Fleet Management</strong> — vehicles, key dates, daily checks and defects.</li>
 <li><strong>Staff</strong> — manager and admin accounts.</li>
 <li><strong>Case Notes</strong> — running notes on ongoing matters.</li>
@@ -412,6 +413,17 @@ hr { display:none; }
 <li><strong>Restock</strong> — enter the new seal number and the earliest expiry date of the items in the bag. Bags with expired items must be restocked before they can be signed out.</li>
 </ul>
 <p>The <strong>Signed out</strong> tab shows every bag currently with a crew and how long it has been out. <strong>Sign-out history</strong> lists every sign-out and return. Click a bag to see its full history: added, signed out, returned, restocked and edited, with who did each step and when.</p>
+<h3 id="sec-medication-store">Medication store</h3>
+<p>The <strong>Medication Store</strong> page (under Medication in the sidebar) shows how much of each medicine is in stock, its expiry dates and its minimum quantity.</p>
+<ul>
+<li><strong>+ Add medicine</strong> — name, strength, form, what it's counted in (for example tablets or ampoules), the <strong>minimum quantity</strong> and location. You can enter the opening stock with its expiry date at the same time.</li>
+<li>Stock is held in <strong>batches</strong>, each with its own expiry date and quantity. The list shows the in-date quantity, the earliest expiry and a status: <strong>OK</strong>, <strong>Below minimum</strong> or <strong>Out of stock</strong>. Expired stock is shown separately and doesn't count towards the minimum.</li>
+<li><strong>Receive</strong> — enter the quantity, expiry date, batch number and supplier reference. Expired stock can't be received.</li>
+<li><strong>Issue</strong> — enter the quantity and what it's for (drug bag restock, used on patient, transfer or other). Dynamo takes stock from the batch with the earliest expiry first and never issues expired stock. You'll be warned if the issue takes the medicine below its minimum.</li>
+<li>Click a medicine to see its batches. Use <strong>Dispose</strong> to remove expired or damaged stock (with a reason and witness), and <strong>Stock count</strong> to correct the quantity after a physical count.</li>
+<li>The <strong>Stock movements</strong> tab lists every receipt, issue, disposal and count, with the balance after each one and who did it.</li>
+</ul>
+<p>The weekly summary email includes medicines below minimum and expired batches. The medication store is for stock control only; it is not a controlled drugs register.</p>
 <h3 id="sec-fleet-management">Fleet management</h3>
 <p><strong>Fleet Management</strong> has three tabs:</p>
 <ul>
