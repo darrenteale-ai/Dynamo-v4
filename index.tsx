@@ -114,6 +114,7 @@ async function snapshotDatabase() {
     "users", "incidents", "incident_audit_log", "incident_attachments", "corrective_actions",
     "safety_alerts", "safety_alert_acks", "app_settings", "case_notes", "case_note_entries", "gdpr_log",
     "vehicles", "vdi_checks", "vehicle_defects", "assets", "asset_issues",
+    "drug_bags", "drug_bag_movements", "drug_bag_events",
   ];
   const out: Record<string, any[]> = {};
   for (const t of tables) out[t] = (await sql.unsafe(`SELECT * FROM ${t}`)) as any[];
@@ -715,6 +716,57 @@ async function ensureSchema() {
       resolved_at TIMESTAMPTZ,
       resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       resolution_notes TEXT
+    )
+  `;
+
+  // ---- Medication: drug bags, sign-out / sign-in, history ----
+  await sql`
+    CREATE TABLE IF NOT EXISTS drug_bags (
+      id SERIAL PRIMARY KEY,
+      bag_number TEXT UNIQUE NOT NULL,
+      bag_type TEXT,
+      status TEXT NOT NULL DEFAULT 'AVAILABLE',
+      seal_number TEXT,
+      expiry_date DATE,
+      notes TEXT,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS drug_bag_movements (
+      id SERIAL PRIMARY KEY,
+      bag_id INTEGER NOT NULL REFERENCES drug_bags(id) ON DELETE CASCADE,
+      signed_out_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      signed_out_to TEXT NOT NULL,
+      second_crew TEXT,
+      vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+      call_sign TEXT,
+      seal_out TEXT,
+      out_notes TEXT,
+      issued_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      returned_at TIMESTAMPTZ,
+      returned_by TEXT,
+      seal_in TEXT,
+      seal_intact BOOLEAN,
+      drugs_used BOOLEAN,
+      return_notes TEXT,
+      received_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS drug_bag_movements_bag ON drug_bag_movements (bag_id, signed_out_at DESC)`;
+  // A bag can only be signed out to one crew at a time.
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS drug_bag_movements_one_open ON drug_bag_movements (bag_id) WHERE returned_at IS NULL`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS drug_bag_events (
+      id SERIAL PRIMARY KEY,
+      bag_id INTEGER NOT NULL REFERENCES drug_bags(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      details TEXT,
+      actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      actor_name TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
 
@@ -2177,6 +2229,7 @@ async function renderPrivacyPage() {
 <li><strong>If you submit an incident report:</strong> your name, optionally your email address (so we can send you a reference), the vehicle registration, call sign, crew names, CAD reference, the date, time and place of the incident, your description, and any photos you attach. Near-miss reports can be made anonymously.</li>
 <li><strong>People mentioned in a report</strong> (for example patients, members of the public or colleagues): names and details that the reporter or investigating manager records. Reports about clinical care, safeguarding, medication or injuries may include <strong>information about a person's health</strong>, which is special category data.</li>
 <li><strong>If you complete a vehicle daily check:</strong> your name, the vehicle, its mileage, the check results and any defects you describe.</li>
+<li><strong>If a drug bag is signed out to you or returned by you:</strong> your name, the bag number, seal numbers, the vehicle and call sign, when it was signed out and returned, and whether any items were used.</li>
 <li><strong>If company equipment is issued to you:</strong> your name, the item, when it was issued and returned, and its condition on return.</li>
 <li><strong>Managers and administrators who use Dynamo:</strong> name, work email, phone number, role, sign-in credentials (stored only as a secure hash), and a record of actions taken on each incident.</li>
 </ul>
@@ -2544,6 +2597,15 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
         WHERE d.reported_by ILIKE ${like} ORDER BY d.reported_at ASC
       `
     : [];
+  const drugBagMovements = subject.name
+    ? await sql`
+        SELECT m.id, b.bag_number, m.signed_out_at, m.signed_out_to, m.second_crew, m.call_sign, m.seal_out,
+          m.returned_at, m.returned_by, m.seal_in, m.seal_intact, m.drugs_used, m.out_notes, m.return_notes
+        FROM drug_bag_movements m JOIN drug_bags b ON b.id = m.bag_id
+        WHERE m.signed_out_to ILIKE ${like} OR m.second_crew ILIKE ${like} OR m.returned_by ILIKE ${like}
+        ORDER BY m.signed_out_at ASC
+      `
+    : [];
   const equipmentIssued = subject.name
     ? await sql`
         SELECT i.id, a.asset_tag, a.name AS asset_name, i.issued_to_name, i.issued_at, i.due_back, i.issue_notes,
@@ -2578,6 +2640,7 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
     vehicleChecks,
     vehicleDefectsReported,
     equipmentIssued,
+    drugBagMovements,
   };
 }
 
@@ -2648,6 +2711,19 @@ async function anonymiseSubject(
       WHERE issued_to_name ~* ${rx} RETURNING id
     `;
     summary.equipmentIssuesAnonymised = ai.length;
+    const db = await sql`
+      UPDATE drug_bag_movements SET
+        signed_out_to = regexp_replace(signed_out_to, ${rx}, ${label}, 'gi'),
+        second_crew = regexp_replace(second_crew, ${rx}, ${label}, 'gi'),
+        returned_by = regexp_replace(returned_by, ${rx}, ${label}, 'gi')
+      WHERE signed_out_to ~* ${rx} OR second_crew ~* ${rx} OR returned_by ~* ${rx} RETURNING id
+    `;
+    summary.drugBagMovementsAnonymised = db.length;
+    const de = await sql`
+      UPDATE drug_bag_events SET details = regexp_replace(details, ${rx}, ${label}, 'gi')
+      WHERE details ~* ${rx} RETURNING id
+    `;
+    summary.drugBagEventsAnonymised = de.length;
     for (const r of rows as any[]) {
       await logIncidentAudit(r.id, auth, "ANONYMISED", `Named individual anonymised following a data protection request`);
     }
@@ -3514,6 +3590,309 @@ document.getElementById("incGeneral").onchange = (e) => document.body.classList.
 })().catch((e) => { document.getElementById("out").textContent = "Something went wrong: " + e.message; });
 </script></body></html>`;
 
+// =====================================================================
+// Medication: drug bag register, sign-out to crew, sign-in on return,
+// restocking, and a permanent history per bag. Managers and admins only.
+// Crew are not Dynamo users, so crew names are free text.
+// =====================================================================
+
+const DRUG_BAG_STATUSES = ["AVAILABLE", "SIGNED_OUT", "RESTOCK", "OUT_OF_SERVICE"];
+const DRUG_BAG_STATUS_LABEL: Record<string, string> = {
+  AVAILABLE: "Available",
+  SIGNED_OUT: "Signed out",
+  RESTOCK: "Needs restock / check",
+  OUT_OF_SERVICE: "Out of service",
+};
+
+function normaliseBagNumber(v: any): string | null {
+  const s = String(v ?? "").toUpperCase().replace(/\s+/g, " ").trim().slice(0, 40);
+  return s || null;
+}
+
+async function logBagEvent(bagId: number, auth: any, action: string, details: string) {
+  await sql`
+    INSERT INTO drug_bag_events (bag_id, action, details, actor_id, actor_name)
+    VALUES (${bagId}, ${action}, ${details}, ${auth?.sub || null}, ${auth?.name || null})
+  `;
+}
+
+function serializeDrugBag(row: any) {
+  return {
+    id: row.id,
+    bagNumber: row.bag_number,
+    bagType: row.bag_type,
+    status: row.status,
+    statusLabel: DRUG_BAG_STATUS_LABEL[row.status] || row.status,
+    sealNumber: row.seal_number,
+    expiryDate: toDateStr(row.expiry_date),
+    expiryStatus: dueStatus(row.expiry_date), // OVERDUE (expired) | DUE_SOON (30 days) | OK | null
+    notes: row.notes,
+    active: row.active,
+    createdAt: row.created_at,
+    current: row.mv_id
+      ? {
+          id: row.mv_id,
+          signedOutAt: row.mv_out_at,
+          signedOutTo: row.mv_to,
+          secondCrew: row.mv_second,
+          vehicleReg: row.mv_reg,
+          callSign: row.mv_call_sign,
+          sealOut: row.mv_seal_out,
+          issuedByName: row.mv_issued_by_name,
+        }
+      : null,
+  };
+}
+
+function serializeBagMovement(row: any) {
+  return {
+    id: row.id,
+    bagId: row.bag_id,
+    bagNumber: row.bag_number,
+    signedOutAt: row.signed_out_at,
+    signedOutTo: row.signed_out_to,
+    secondCrew: row.second_crew,
+    vehicleId: row.vehicle_id,
+    vehicleReg: row.vehicle_reg,
+    callSign: row.call_sign,
+    sealOut: row.seal_out,
+    outNotes: row.out_notes,
+    issuedByName: row.issued_by_name,
+    returnedAt: row.returned_at,
+    returnedBy: row.returned_by,
+    sealIn: row.seal_in,
+    sealIntact: row.seal_intact,
+    drugsUsed: row.drugs_used,
+    returnNotes: row.return_notes,
+    receivedByName: row.received_by_name,
+  };
+}
+
+async function listDrugBags(includeArchived: boolean, id: number | null = null) {
+  return await sql`
+    SELECT b.*, m.id AS mv_id, m.signed_out_at AS mv_out_at, m.signed_out_to AS mv_to, m.second_crew AS mv_second,
+      v.reg AS mv_reg, m.call_sign AS mv_call_sign, m.seal_out AS mv_seal_out, u.name AS mv_issued_by_name
+    FROM drug_bags b
+    LEFT JOIN drug_bag_movements m ON m.bag_id = b.id AND m.returned_at IS NULL
+    LEFT JOIN vehicles v ON v.id = m.vehicle_id
+    LEFT JOIN users u ON u.id = m.issued_by
+    WHERE (${id}::int IS NULL OR b.id = ${id})
+      AND (${includeArchived} OR b.active = TRUE OR ${id}::int IS NOT NULL)
+    ORDER BY b.active DESC, b.bag_number
+  `;
+}
+
+async function getDrugBag(id: number) {
+  const [row] = await listDrugBags(true, id);
+  return row || null;
+}
+
+async function listBagMovements(opts: { bagId?: number | null; limit?: number }) {
+  const bagId = opts.bagId ?? null;
+  return await sql`
+    SELECT m.*, b.bag_number, v.reg AS vehicle_reg, ui.name AS issued_by_name, ur.name AS received_by_name
+    FROM drug_bag_movements m
+    JOIN drug_bags b ON b.id = m.bag_id
+    LEFT JOIN vehicles v ON v.id = m.vehicle_id
+    LEFT JOIN users ui ON ui.id = m.issued_by
+    LEFT JOIN users ur ON ur.id = m.received_by
+    WHERE (${bagId}::int IS NULL OR m.bag_id = ${bagId})
+    ORDER BY m.signed_out_at DESC
+    LIMIT ${opts.limit ?? 300}
+  `;
+}
+
+async function bagNumberTaken(bagNumber: string, exceptId: number | null) {
+  // "DB-001", "DB 001" and "db001" are the same bag.
+  const key = bagNumber.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const [row] = await sql`
+    SELECT id FROM drug_bags WHERE regexp_replace(upper(bag_number), '[^A-Z0-9]', '', 'g') = ${key}
+      AND (${exceptId}::int IS NULL OR id <> ${exceptId})
+  `;
+  return !!row;
+}
+
+async function handleMedicationRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+  if (!path.startsWith("/api/medication")) return null;
+  const auth = await getAuth(req);
+  if (!auth) return json({ error: "Unauthorized" }, 401);
+  if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+
+  if (path === "/api/medication/summary" && method === "GET") {
+    const bags = ((await listDrugBags(false)) as any[]).map(serializeDrugBag);
+    return json({
+      total: bags.length,
+      available: bags.filter((b) => b.status === "AVAILABLE" && b.expiryStatus !== "OVERDUE").length,
+      signedOut: bags.filter((b) => b.status === "SIGNED_OUT").length,
+      restock: bags.filter((b) => b.status === "RESTOCK").length,
+      outOfService: bags.filter((b) => b.status === "OUT_OF_SERVICE").length,
+      expired: bags.filter((b) => b.expiryStatus === "OVERDUE").length,
+      expiringSoon: bags.filter((b) => b.expiryStatus === "DUE_SOON").length,
+    });
+  }
+
+  if (path === "/api/medication/bags" && method === "GET") {
+    return json(((await listDrugBags(url.searchParams.get("archived") === "1")) as any[]).map(serializeDrugBag));
+  }
+
+  if (path === "/api/medication/bags" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const bagNumber = normaliseBagNumber(body.bagNumber);
+    if (!bagNumber) return json({ error: "Enter the drug bag number." }, 400);
+    if (await bagNumberTaken(bagNumber, null)) return json({ error: `Drug bag ${bagNumber} already exists.` }, 400);
+    const [row] = await sql`
+      INSERT INTO drug_bags (bag_number, bag_type, seal_number, expiry_date, notes)
+      VALUES (${bagNumber}, ${cleanText(body.bagType, 80)}, ${cleanText(body.sealNumber, 40)}, ${cleanDate(body.expiryDate)}, ${cleanText(body.notes, 1000)})
+      RETURNING id
+    `;
+    await logBagEvent(row.id, auth, "ADDED",
+      `Drug bag ${bagNumber} added${body.sealNumber ? `, seal ${cleanText(body.sealNumber, 40)}` : ""}${cleanDate(body.expiryDate) ? `, earliest expiry ${fmtDocDate(cleanDate(body.expiryDate))}` : ""} by ${auth.name}`);
+    return json(serializeDrugBag(await getDrugBag(row.id)), 201);
+  }
+
+  if (path === "/api/medication/movements" && method === "GET") {
+    return json(((await listBagMovements({ limit: 500 })) as any[]).map(serializeBagMovement));
+  }
+
+  const m = path.match(/^\/api\/medication\/bags\/(\d+)(\/(sign-out|return|restock|history))?$/);
+  if (!m) return json({ error: "Not found" }, 404);
+  const id = Number(m[1]);
+  const action = m[3] || null;
+  const bag = await getDrugBag(id);
+  if (!bag) return json({ error: "Drug bag not found" }, 404);
+
+  if (!action && method === "PUT") {
+    const body = await req.json().catch(() => ({}));
+    const bagNumber = normaliseBagNumber(body.bagNumber) || bag.bag_number;
+    if (await bagNumberTaken(bagNumber, id)) return json({ error: `Drug bag ${bagNumber} already exists.` }, 400);
+    const active = body.active === false ? false : true;
+    if (!active && bag.mv_id) return json({ error: "Sign this bag back in before archiving it." }, 400);
+    // SIGNED_OUT is controlled by sign-out / sign-in; the rest can be set by hand.
+    let status = bag.status;
+    if (bag.mv_id) status = "SIGNED_OUT";
+    else if (["AVAILABLE", "RESTOCK", "OUT_OF_SERVICE"].includes(body.status)) status = body.status;
+    const next = {
+      bag_type: cleanText(body.bagType, 80),
+      seal_number: cleanText(body.sealNumber, 40),
+      expiry_date: cleanDate(body.expiryDate),
+      notes: cleanText(body.notes, 1000),
+    };
+    await sql`
+      UPDATE drug_bags SET bag_number = ${bagNumber}, bag_type = ${next.bag_type}, status = ${status},
+        seal_number = ${next.seal_number}, expiry_date = ${next.expiry_date}, notes = ${next.notes},
+        active = ${active}, updated_at = now()
+      WHERE id = ${id}
+    `;
+    const changes: string[] = [];
+    if (bagNumber !== bag.bag_number) changes.push(`number ${bag.bag_number} → ${bagNumber}`);
+    if ((bag.seal_number || null) !== next.seal_number) changes.push(`seal ${bag.seal_number || "none"} → ${next.seal_number || "none"}`);
+    if (toDateStr(bag.expiry_date) !== next.expiry_date) changes.push(`earliest expiry ${bag.expiry_date ? fmtDocDate(bag.expiry_date) : "none"} → ${next.expiry_date ? fmtDocDate(next.expiry_date) : "none"}`);
+    if (bag.status !== status) changes.push(`status ${DRUG_BAG_STATUS_LABEL[bag.status]} → ${DRUG_BAG_STATUS_LABEL[status]}`);
+    if ((bag.bag_type || null) !== next.bag_type) changes.push(`type → ${next.bag_type || "none"}`);
+    if (bag.active !== active) changes.push(active ? "restored from archive" : "archived");
+    if (changes.length) await logBagEvent(id, auth, "EDITED", `${changes.join("; ")} (by ${auth.name})`);
+    return json(serializeDrugBag(await getDrugBag(id)));
+  }
+
+  if (action === "history" && method === "GET") {
+    const movements = ((await listBagMovements({ bagId: id, limit: 500 })) as any[]).map(serializeBagMovement);
+    const events = await sql`SELECT * FROM drug_bag_events WHERE bag_id = ${id} ORDER BY created_at DESC LIMIT 500`;
+    return json({
+      movements,
+      events: (events as any[]).map((e) => ({ id: e.id, action: e.action, details: e.details, actorName: e.actor_name, createdAt: e.created_at })),
+    });
+  }
+
+  if (action === "sign-out" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    if (!bag.active) return json({ error: "This bag is archived." }, 400);
+    if (bag.mv_id) return json({ error: `Bag ${bag.bag_number} is already signed out to ${bag.mv_to}. Sign it back in first.` }, 400);
+    if (bag.status !== "AVAILABLE") {
+      return json({ error: `Bag ${bag.bag_number} is “${DRUG_BAG_STATUS_LABEL[bag.status]}” and can't be signed out until it's restocked and marked available.` }, 400);
+    }
+    if (dueStatus(bag.expiry_date) === "OVERDUE") {
+      return json({ error: `Bag ${bag.bag_number} contains expired items (earliest expiry ${fmtDocDate(bag.expiry_date)}). Restock it before signing it out.` }, 400);
+    }
+    const to = cleanText(body.signedOutTo, 120);
+    const seal = cleanText(body.sealNumber, 40);
+    if (!to) return json({ error: "Enter who the bag is signed out to." }, 400);
+    if (!seal) return json({ error: "Enter the seal number on the bag." }, 400);
+    const vehicleId = body.vehicleId ? Number(body.vehicleId) : null;
+    let vehicleReg: string | null = null;
+    if (vehicleId) {
+      const [v] = await sql`SELECT reg FROM vehicles WHERE id = ${vehicleId}`;
+      if (!v) return json({ error: "Vehicle not found" }, 400);
+      vehicleReg = v.reg;
+    }
+    const second = cleanText(body.secondCrew, 120);
+    const callSign = cleanText(body.callSign, 40);
+    try {
+      await sql`
+        INSERT INTO drug_bag_movements (bag_id, signed_out_to, second_crew, vehicle_id, call_sign, seal_out, out_notes, issued_by)
+        VALUES (${id}, ${to}, ${second}, ${vehicleId}, ${callSign}, ${seal}, ${cleanText(body.notes, 1000)}, ${auth.sub})
+      `;
+    } catch (err: any) {
+      if (String(err?.message || "").includes("duplicate key")) return json({ error: "This bag has just been signed out by someone else." }, 409);
+      throw err;
+    }
+    await sql`UPDATE drug_bags SET status = 'SIGNED_OUT', seal_number = ${seal}, updated_at = now() WHERE id = ${id}`;
+    const sealNote = bag.seal_number && bag.seal_number !== seal ? ` (seal on record was ${bag.seal_number})` : "";
+    await logBagEvent(id, auth, "SIGNED_OUT",
+      `Signed out to ${to}${second ? ` and ${second}` : ""}${vehicleReg ? `, vehicle ${vehicleReg}` : ""}${callSign ? `, call sign ${callSign}` : ""}, seal ${seal}${sealNote} (recorded by ${auth.name})`);
+    return json(serializeDrugBag(await getDrugBag(id)));
+  }
+
+  if (action === "return" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    if (!bag.mv_id) return json({ error: "This bag isn't signed out." }, 400);
+    const by = cleanText(body.returnedBy, 120);
+    const seal = cleanText(body.sealNumber, 40);
+    if (!by) return json({ error: "Enter who returned the bag." }, 400);
+    if (!seal) return json({ error: "Enter the seal number on the bag as returned." }, 400);
+    if (typeof body.sealIntact !== "boolean") return json({ error: "Say whether the seal is intact." }, 400);
+    if (typeof body.drugsUsed !== "boolean") return json({ error: "Say whether any drugs or items were used." }, 400);
+    const sealMatches = !bag.mv_seal_out || bag.mv_seal_out.replace(/\s/g, "").toUpperCase() === seal.replace(/\s/g, "").toUpperCase();
+    const intact = body.sealIntact && sealMatches;
+    const needsRestock = !intact || body.drugsUsed;
+    const notes = cleanText(body.notes, 1000);
+    if (needsRestock && !notes && body.drugsUsed) return json({ error: "Record what was used (and the incident or patient reference if relevant) in the notes." }, 400);
+    await sql`
+      UPDATE drug_bag_movements SET returned_at = now(), returned_by = ${by}, seal_in = ${seal},
+        seal_intact = ${intact}, drugs_used = ${body.drugsUsed}, return_notes = ${notes}, received_by = ${auth.sub}
+      WHERE id = ${bag.mv_id}
+    `;
+    const newStatus = needsRestock ? "RESTOCK" : "AVAILABLE";
+    await sql`UPDATE drug_bags SET status = ${newStatus}, seal_number = ${seal}, updated_at = now() WHERE id = ${id}`;
+    const parts = [`Signed back in by ${by}`, `seal ${seal}`];
+    if (!sealMatches) parts.push(`SEAL NUMBER DOES NOT MATCH sign-out seal ${bag.mv_seal_out}`);
+    else if (!body.sealIntact) parts.push("seal broken");
+    if (body.drugsUsed) parts.push("drugs/items used");
+    parts.push(needsRestock ? "bag needs restock / check" : "bag available");
+    await logBagEvent(id, auth, "RETURNED", `${parts.join(", ")} (received by ${auth.name})`);
+    return json({ ...serializeDrugBag(await getDrugBag(id)), sealMismatch: !sealMatches });
+  }
+
+  if (action === "restock" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    if (bag.mv_id) return json({ error: "Sign this bag back in before restocking it." }, 400);
+    const seal = cleanText(body.sealNumber, 40);
+    const expiry = cleanDate(body.expiryDate);
+    if (!seal) return json({ error: "Enter the new seal number." }, 400);
+    if (!expiry) return json({ error: "Enter the earliest expiry date of the items in the bag." }, 400);
+    if (dueStatus(expiry) === "OVERDUE") return json({ error: "The earliest expiry date is in the past. Replace the expired items first." }, 400);
+    await sql`
+      UPDATE drug_bags SET status = 'AVAILABLE', seal_number = ${seal}, expiry_date = ${expiry}, updated_at = now()
+      WHERE id = ${id}
+    `;
+    const notes = cleanText(body.notes, 1000);
+    await logBagEvent(id, auth, "RESTOCKED",
+      `Restocked and resealed: seal ${seal}, earliest expiry ${fmtDocDate(expiry)}${notes ? ` — ${notes}` : ""} (by ${auth.name})`);
+    return json(serializeDrugBag(await getDrugBag(id)));
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
 async function handleFleetRequest(req: Request, url: URL, path: string, method: string, ip: string): Promise<Response | null> {
   // ---- Public (no login): the crew VDI form ----
   if (path === "/api/public/vdi/setup" && method === "GET") {
@@ -3837,6 +4216,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     }
     const gdprResponse = await handleGdprRequest(req, url, path, method);
     if (gdprResponse) return gdprResponse;
+    const medicationResponse = await handleMedicationRequest(req, url, path, method);
+    if (medicationResponse) return medicationResponse;
     const fleetResponse = await handleFleetRequest(req, url, path, method, ip);
     if (fleetResponse) return fleetResponse;
     // Company Assets has been removed from the app. Its API is switched off

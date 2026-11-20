@@ -592,6 +592,15 @@ const api = {
   getSafetyAlertAcks: (id) => request(`/safety-alerts/${id}/acks`),
   archiveSafetyAlert: (id) => request(`/safety-alerts/${id}`, { method: 'PUT', body: { active: false } }),
   runDigest: () => request('/digest/run', { method: 'POST' }),
+  getMedicationSummary: () => request('/medication/summary'),
+  listDrugBags: (archived) => request('/medication/bags', { params: { archived: archived ? 1 : undefined } }),
+  createDrugBag: (data) => request('/medication/bags', { method: 'POST', body: data }),
+  updateDrugBag: (id, data) => request(`/medication/bags/${id}`, { method: 'PUT', body: data }),
+  signOutDrugBag: (id, data) => request(`/medication/bags/${id}/sign-out`, { method: 'POST', body: data }),
+  returnDrugBag: (id, data) => request(`/medication/bags/${id}/return`, { method: 'POST', body: data }),
+  restockDrugBag: (id, data) => request(`/medication/bags/${id}/restock`, { method: 'POST', body: data }),
+  getDrugBagHistory: (id) => request(`/medication/bags/${id}/history`),
+  listDrugBagMovements: () => request('/medication/movements'),
   getFleetSummary: () => request('/fleet/summary'),
   listVehicles: (archived) => request('/fleet/vehicles', { params: { archived: archived ? 1 : undefined } }),
   createVehicle: (data) => request('/fleet/vehicles', { method: 'POST', body: data }),
@@ -745,6 +754,11 @@ function buildNav(isAdmin) {
   safety.push({ to: '/safety-alerts', label: 'Safety Alerts', icon: '⚠️' });
   nav.push({ section: 'SAFETY & COMPLIANCE', items: safety });
   if (isAdmin) {
+    nav.push({ section: 'MEDICATION', items: [
+      { to: '/medication', label: 'Medication', icon: '💊' },
+    ] });
+  }
+  if (isAdmin) {
     nav.push({ section: 'FLEET', items: [
       { to: '/fleet', label: 'Fleet Management', icon: '🚑' },
     ] });
@@ -763,7 +777,8 @@ function Layout({ children }) {
   const { user, logout } = useAuth();
   const NAV = buildNav(isMgrOrAdmin(user?.role));
   const location = useLocation();
-  const pageTitle = location.pathname.startsWith('/fleet') ? 'Fleet Management' : 'Incident Reporting';
+  const pageTitle = location.pathname.startsWith('/fleet') ? 'Fleet Management'
+    : location.pathname.startsWith('/medication') ? 'Medication' : 'Incident Reporting';
 
   return (
     <div className="app-shell">
@@ -4717,6 +4732,718 @@ function AddDefectModal({ vehicles, onClose, onSaved }) {
   );
 }
 
+// =====================================================================
+// Medication: drug bag register, sign-out / sign-in and restocking.
+// =====================================================================
+
+const DRUG_BAG_STATUS_BADGE = {
+  AVAILABLE: 'badge-green',
+  SIGNED_OUT: 'badge-blue',
+  RESTOCK: 'badge-amber',
+  OUT_OF_SERVICE: 'badge-grey',
+};
+const DRUG_BAG_TYPES = ['Paramedic drug bag', 'Technician drug bag', 'Controlled drugs pouch', 'Other'];
+const NEW_BAG = '__new__';
+
+function bagExpiryCell(b) {
+  if (!b.expiryDate) return <span className="muted">Not recorded</span>;
+  const cls = b.expiryStatus === 'OVERDUE' ? 'badge-red' : b.expiryStatus === 'DUE_SOON' ? 'badge-amber' : null;
+  return cls
+    ? <span className={'badge ' + cls}>{fmtDate(b.expiryDate)}{b.expiryStatus === 'OVERDUE' ? ' — expired' : ''}</span>
+    : fmtDate(b.expiryDate);
+}
+
+function hoursSince(iso) {
+  const h = Math.floor((Date.now() - new Date(iso).getTime()) / 3600000);
+  if (h < 1) return 'under 1 hour';
+  if (h < 48) return `${h} hour${h === 1 ? '' : 's'}`;
+  return `${Math.floor(h / 24)} days`;
+}
+
+function Medication() {
+  const [tab, setTab] = useState('bags');
+  const [summary, setSummary] = useState(null);
+  const [bags, setBags] = useState([]);
+  const [movements, setMovements] = useState([]);
+  const [vehicles, setVehicles] = useState([]);
+  const [showArchived, setShowArchived] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [signingOut, setSigningOut] = useState(null); // null | {} | { bagId }
+  const [returning, setReturning] = useState(null);
+  const [restocking, setRestocking] = useState(null);
+  const [editing, setEditing] = useState(null); // bag | 'new'
+
+  function loadAll() {
+    setError('');
+    return Promise.all([
+      api.getMedicationSummary().then(setSummary),
+      api.listDrugBags(showArchived).then(setBags),
+      api.listDrugBagMovements().then(setMovements),
+      api.listVehicles(false).then((v) => setVehicles(v.filter((x) => x.active))).catch(() => {}),
+    ])
+      .catch((err) => setError(err.message || 'Failed to load medication data'))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived]);
+
+  function done(message) {
+    setSigningOut(null); setReturning(null); setRestocking(null); setEditing(null);
+    if (message) setNotice(message);
+    loadAll();
+  }
+
+  if (loading) return <div className="page-loading">Loading…</div>;
+
+  const out = bags.filter((b) => b.current);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Medication</h1>
+          <div className="page-sub">Drug bag tracking: sign out to crews, sign back in, restock and reseal</div>
+        </div>
+        <div className="page-header-actions">
+          <button className="btn btn-ghost" onClick={() => setEditing('new')}>+ Add bag</button>
+          <button className="btn btn-primary" onClick={() => setSigningOut({})}>Sign out a bag</button>
+        </div>
+      </div>
+
+      {error && <div className="error-banner" style={{ marginBottom: 12 }}>{error}</div>}
+      {notice && (
+        <div className={notice.startsWith('⚠') ? 'warning-banner' : 'success-banner'} style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+          <span>{notice}</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setNotice('')}>Dismiss</button>
+        </div>
+      )}
+
+      {summary && (
+        <div className="kpi-grid">
+          <div className="kpi-card kpi-card-green">
+            <div className="kpi-value">{summary.available}/{summary.total}</div>
+            <div className="kpi-label">Bags available</div>
+            <div className="kpi-sub">Sealed and ready to sign out</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-value">{summary.signedOut}</div>
+            <div className="kpi-label">Signed out</div>
+            <div className="kpi-sub">Currently with crews</div>
+          </div>
+          <div className={'kpi-card ' + (summary.restock ? 'kpi-card-amber' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.restock}</div>
+            <div className="kpi-label">Need restock / check</div>
+            <div className="kpi-sub">Used, or seal broken or changed</div>
+          </div>
+          <div className={'kpi-card ' + (summary.expired ? 'kpi-card-red' : summary.expiringSoon ? 'kpi-card-amber' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.expired}</div>
+            <div className="kpi-label">Bags with expired items</div>
+            <div className="kpi-sub">{summary.expiringSoon} with items expiring in the next 30 days</div>
+          </div>
+        </div>
+      )}
+
+      <div className="tabs">
+        <button className={'tab-btn' + (tab === 'bags' ? ' active' : '')} onClick={() => setTab('bags')}>Drug bags</button>
+        <button className={'tab-btn' + (tab === 'out' ? ' active' : '')} onClick={() => setTab('out')}>
+          Signed out{out.length ? ` (${out.length})` : ''}
+        </button>
+        <button className={'tab-btn' + (tab === 'history' ? ' active' : '')} onClick={() => setTab('history')}>Sign-out history</button>
+      </div>
+
+      {tab === 'bags' && (
+        <div className="card table-card">
+          <div style={{ padding: '10px 16px', display: 'flex', justifyContent: 'flex-end' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              Show archived bags
+            </label>
+          </div>
+          {bags.length === 0 ? (
+            <div className="empty">No drug bags yet. Use “+ Add bag” to add your bag numbers.</div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Bag number</th>
+                    <th>Status</th>
+                    <th>Seal</th>
+                    <th>Earliest expiry</th>
+                    <th>With</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bags.map((b) => (
+                    <tr key={b.id} className="row-clickable" onClick={() => setEditing(b)} style={b.active ? undefined : { opacity: 0.55 }}>
+                      <td>
+                        <div className="ref-link">{b.bagNumber}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>{b.bagType || '—'}{!b.active ? ' · archived' : ''}</div>
+                      </td>
+                      <td><span className={'badge ' + (DRUG_BAG_STATUS_BADGE[b.status] || 'badge-grey')}>{b.statusLabel}</span></td>
+                      <td>{b.sealNumber || <span className="muted">—</span>}</td>
+                      <td>{bagExpiryCell(b)}</td>
+                      <td>
+                        {b.current ? (
+                          <>
+                            <div>{b.current.signedOutTo}{b.current.secondCrew ? ` & ${b.current.secondCrew}` : ''}</div>
+                            <div className="muted" style={{ fontSize: 12 }}>
+                              {[b.current.vehicleReg, b.current.callSign].filter(Boolean).join(' · ') || '—'} · out {hoursSince(b.current.signedOutAt)}
+                            </div>
+                          </>
+                        ) : <span className="muted">—</span>}
+                      </td>
+                      <td onClick={(e) => e.stopPropagation()} style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
+                        {b.active && b.status === 'AVAILABLE' && b.expiryStatus !== 'OVERDUE' && (
+                          <button className="btn btn-primary btn-sm" onClick={() => setSigningOut({ bagId: b.id })}>Sign out</button>
+                        )}
+                        {b.current && <button className="btn btn-primary btn-sm" onClick={() => setReturning(b)}>Sign in</button>}
+                        {b.active && !b.current && (b.status === 'RESTOCK' || (b.status === 'AVAILABLE' && b.expiryStatus === 'OVERDUE')) && (
+                          <button className="btn btn-ghost btn-sm" onClick={() => setRestocking(b)}>Restock</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'out' && (
+        <div className="card table-card">
+          {out.length === 0 ? (
+            <div className="empty">No bags are signed out.</div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr><th>Bag</th><th>Signed out to</th><th>Vehicle / call sign</th><th>Seal out</th><th>Signed out</th><th></th></tr>
+              </thead>
+              <tbody>
+                {out.map((b) => (
+                  <tr key={b.id}>
+                    <td><span className="ref-link">{b.bagNumber}</span></td>
+                    <td>{b.current.signedOutTo}{b.current.secondCrew ? <div className="muted" style={{ fontSize: 12 }}>& {b.current.secondCrew}</div> : null}</td>
+                    <td>{[b.current.vehicleReg, b.current.callSign].filter(Boolean).join(' · ') || '—'}</td>
+                    <td>{b.current.sealOut || '—'}</td>
+                    <td>
+                      {fmtDate(b.current.signedOutAt)} {fmtTime(b.current.signedOutAt)}
+                      <div className="muted" style={{ fontSize: 12 }}>{hoursSince(b.current.signedOutAt)} ago · by {b.current.issuedByName || '—'}</div>
+                    </td>
+                    <td style={{ textAlign: 'right' }}><button className="btn btn-primary btn-sm" onClick={() => setReturning(b)}>Sign in</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {tab === 'history' && (
+        <div className="card table-card">
+          {movements.length === 0 ? (
+            <div className="empty">No bags have been signed out yet.</div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr><th>Bag</th><th>Signed out</th><th>To</th><th>Vehicle</th><th>Seal out / in</th><th>Returned</th><th>Result</th></tr>
+                </thead>
+                <tbody>
+                  {movements.map((mv) => (
+                    <tr key={mv.id}>
+                      <td><span className="ref-link">{mv.bagNumber}</span></td>
+                      <td>{fmtDate(mv.signedOutAt)} {fmtTime(mv.signedOutAt)}<div className="muted" style={{ fontSize: 12 }}>by {mv.issuedByName || '—'}</div></td>
+                      <td>{mv.signedOutTo}{mv.secondCrew ? <div className="muted" style={{ fontSize: 12 }}>& {mv.secondCrew}</div> : null}</td>
+                      <td>{[mv.vehicleReg, mv.callSign].filter(Boolean).join(' · ') || '—'}</td>
+                      <td>{mv.sealOut || '—'} / {mv.sealIn || '—'}</td>
+                      <td>
+                        {mv.returnedAt ? (
+                          <>{fmtDate(mv.returnedAt)} {fmtTime(mv.returnedAt)}<div className="muted" style={{ fontSize: 12 }}>by {mv.returnedBy} · received by {mv.receivedByName || '—'}</div></>
+                        ) : <span className="badge badge-blue">Still out</span>}
+                      </td>
+                      <td>
+                        {!mv.returnedAt ? '—'
+                          : mv.sealIntact === false ? <span className="badge badge-red">Seal broken / changed</span>
+                          : mv.drugsUsed ? <span className="badge badge-amber">Items used</span>
+                          : <span className="badge badge-green">Intact</span>}
+                        {mv.returnNotes && <div className="muted" style={{ fontSize: 12, maxWidth: 260 }}>{mv.returnNotes}</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {signingOut && (
+        <SignOutBagModal
+          bags={bags.filter((b) => b.active)}
+          vehicles={vehicles}
+          initialBagId={signingOut.bagId}
+          onClose={() => setSigningOut(null)}
+          onSaved={(bag) => done(`Bag ${bag.bagNumber} signed out to ${bag.current?.signedOutTo || ''}.`)}
+        />
+      )}
+      {returning && (
+        <ReturnBagModal
+          bag={returning}
+          onClose={() => setReturning(null)}
+          onSaved={(bag) => done(
+            bag.sealMismatch
+              ? `⚠ Bag ${bag.bagNumber} signed in, but the seal number doesn't match the one it went out with. It has been marked “Needs restock / check”.`
+              : `Bag ${bag.bagNumber} signed in — ${bag.status === 'AVAILABLE' ? 'available again' : 'needs restock / check'}.`
+          )}
+        />
+      )}
+      {restocking && (
+        <RestockBagModal bag={restocking} onClose={() => setRestocking(null)} onSaved={(bag) => done(`Bag ${bag.bagNumber} restocked and available.`)} />
+      )}
+      {editing && (
+        <DrugBagModal
+          bag={editing === 'new' ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={(bag, isNew) => done(isNew ? `Drug bag ${bag.bagNumber} added.` : `Drug bag ${bag.bagNumber} updated.`)}
+          onSignOut={(b) => { setEditing(null); setSigningOut({ bagId: b.id }); }}
+          onReturn={(b) => { setEditing(null); setReturning(b); }}
+          onRestock={(b) => { setEditing(null); setRestocking(b); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Sign a bag out. The bag number dropdown lists bags that can go out, and
+// its last option adds a new bag number on the spot.
+function SignOutBagModal({ bags, vehicles, initialBagId, onClose, onSaved }) {
+  const available = bags.filter((b) => b.status === 'AVAILABLE' && !b.current && b.expiryStatus !== 'OVERDUE');
+  const [bagId, setBagId] = useState(initialBagId ? String(initialBagId) : (available[0] ? String(available[0].id) : NEW_BAG));
+  const [newBagNumber, setNewBagNumber] = useState('');
+  const [newBagType, setNewBagType] = useState(DRUG_BAG_TYPES[0]);
+  const [newExpiry, setNewExpiry] = useState('');
+  const selected = bags.find((b) => String(b.id) === bagId) || null;
+  const [sealNumber, setSealNumber] = useState(selected?.sealNumber || '');
+  const [signedOutTo, setSignedOutTo] = useState('');
+  const [secondCrew, setSecondCrew] = useState('');
+  const [vehicleId, setVehicleId] = useState('');
+  const [callSign, setCallSign] = useState('');
+  const [notes, setNotes] = useState('');
+  const [confirmed, setConfirmed] = useState(false);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  function chooseBag(value) {
+    setBagId(value);
+    const b = bags.find((x) => String(x.id) === value);
+    setSealNumber(b?.sealNumber || '');
+  }
+
+  function chooseVehicle(value) {
+    setVehicleId(value);
+    const v = vehicles.find((x) => String(x.id) === value);
+    if (v?.callSign && !callSign) setCallSign(v.callSign);
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      let id = bagId;
+      if (bagId === NEW_BAG) {
+        const created = await api.createDrugBag({ bagNumber: newBagNumber, bagType: newBagType, sealNumber, expiryDate: newExpiry || null });
+        id = created.id;
+      }
+      const bag = await api.signOutDrugBag(id, { signedOutTo, secondCrew, vehicleId: vehicleId || null, callSign, sealNumber, notes });
+      onSaved(bag);
+    } catch (err) {
+      setError(err.message || 'Failed to sign out bag');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const blocked = selected && (selected.status !== 'AVAILABLE' || selected.current);
+  const expired = selected && selected.expiryStatus === 'OVERDUE';
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={handleSubmit} style={{ maxWidth: 620 }}>
+        <div className="modal-header">
+          <h2>Sign out a drug bag</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <label>Drug bag number <span style={{ color: 'var(--red)' }}>*</span></label>
+            <select value={bagId} onChange={(e) => chooseBag(e.target.value)} required>
+              {available.length === 0 && bagId !== NEW_BAG && <option value="" disabled>No bags available</option>}
+              {available.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.bagNumber}{b.bagType ? ` — ${b.bagType}` : ''}{b.sealNumber ? ` (seal ${b.sealNumber})` : ''}
+                </option>
+              ))}
+              {selected && blocked && (
+                <option value={selected.id}>{selected.bagNumber} — {selected.statusLabel}</option>
+              )}
+              <option value={NEW_BAG}>+ Add a new bag number…</option>
+            </select>
+            {selected && blocked && (
+              <div className="muted" style={{ fontSize: 13, marginTop: 4, color: 'var(--red)' }}>
+                This bag is “{selected.statusLabel}” and can't be signed out.
+              </div>
+            )}
+            {expired && (
+              <div className="muted" style={{ fontSize: 13, marginTop: 4, color: 'var(--red)' }}>
+                This bag has expired items (earliest expiry {fmtDate(selected.expiryDate)}). Restock it first.
+              </div>
+            )}
+            {selected && !blocked && selected.expiryStatus === 'DUE_SOON' && (
+              <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>Note: items expire on {fmtDate(selected.expiryDate)}.</div>
+            )}
+          </div>
+          {bagId === NEW_BAG && (
+            <>
+              <div className="form-field">
+                <label>New bag number <span style={{ color: 'var(--red)' }}>*</span></label>
+                <input value={newBagNumber} onChange={(e) => setNewBagNumber(e.target.value)} placeholder="e.g. DB-014" required autoFocus />
+              </div>
+              <div className="form-field">
+                <label>Bag type</label>
+                <select value={newBagType} onChange={(e) => setNewBagType(e.target.value)}>
+                  {DRUG_BAG_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div className="form-field">
+                <label>Earliest expiry date in the bag</label>
+                <input type="date" value={newExpiry} onChange={(e) => setNewExpiry(e.target.value)} />
+              </div>
+            </>
+          )}
+          <div className="form-field">
+            <label>Seal number <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} placeholder="Number on the tamper seal" required />
+          </div>
+          <div className="form-field">
+            <label>Signed out to (crew member) <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input value={signedOutTo} onChange={(e) => setSignedOutTo(e.target.value)} placeholder="Full name" required />
+          </div>
+          <div className="form-field">
+            <label>Second crew member</label>
+            <input value={secondCrew} onChange={(e) => setSecondCrew(e.target.value)} placeholder="Full name" />
+          </div>
+          <div className="form-field">
+            <label>Vehicle</label>
+            <select value={vehicleId} onChange={(e) => chooseVehicle(e.target.value)}>
+              <option value="">Not assigned to a vehicle</option>
+              {vehicles.map((v) => <option key={v.id} value={v.id}>{v.reg}{v.callSign ? ` — ${v.callSign}` : ''}</option>)}
+            </select>
+          </div>
+          <div className="form-field">
+            <label>Call sign</label>
+            <input value={callSign} onChange={(e) => setCallSign(e.target.value)} />
+          </div>
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <label>Notes</label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
+          </div>
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400 }}>
+              <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} required />
+              I've checked the seal is intact and the seal number matches.
+            </label>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy || (selected && (blocked || expired))}>{busy ? 'Saving…' : 'Sign out bag'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ReturnBagModal({ bag, onClose, onSaved }) {
+  const [returnedBy, setReturnedBy] = useState(bag.current?.signedOutTo || '');
+  const [sealNumber, setSealNumber] = useState('');
+  const [sealIntact, setSealIntact] = useState('');
+  const [drugsUsed, setDrugsUsed] = useState('');
+  const [notes, setNotes] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const mismatch = sealNumber.trim() && bag.current?.sealOut
+    && sealNumber.replace(/\s/g, '').toUpperCase() !== bag.current.sealOut.replace(/\s/g, '').toUpperCase();
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const saved = await api.returnDrugBag(bag.id, {
+        returnedBy, sealNumber, sealIntact: sealIntact === 'YES', drugsUsed: drugsUsed === 'YES', notes,
+      });
+      onSaved(saved);
+    } catch (err) {
+      setError(err.message || 'Failed to sign bag in');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={handleSubmit} style={{ maxWidth: 560 }}>
+        <div className="modal-header">
+          <h2>Sign in drug bag {bag.bagNumber}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
+          Signed out to {bag.current?.signedOutTo}{bag.current?.secondCrew ? ` & ${bag.current.secondCrew}` : ''} on {fmtDate(bag.current?.signedOutAt)} {fmtTime(bag.current?.signedOutAt)}, seal <strong>{bag.current?.sealOut || '—'}</strong>.
+        </div>
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Returned by <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input value={returnedBy} onChange={(e) => setReturnedBy(e.target.value)} required />
+          </div>
+          <div className="form-field">
+            <label>Seal number now on the bag <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} required
+              style={mismatch ? { borderColor: 'var(--red)' } : undefined} />
+            {mismatch && <div style={{ fontSize: 13, marginTop: 4, color: 'var(--red)' }}>Doesn't match the seal it went out with ({bag.current.sealOut}).</div>}
+          </div>
+          <div className="form-field">
+            <label>Is the seal intact? <span style={{ color: 'var(--red)' }}>*</span></label>
+            <select value={sealIntact} onChange={(e) => setSealIntact(e.target.value)} required>
+              <option value="" disabled>Select</option>
+              <option value="YES">Yes — intact</option>
+              <option value="NO">No — broken or missing</option>
+            </select>
+          </div>
+          <div className="form-field">
+            <label>Were any drugs or items used? <span style={{ color: 'var(--red)' }}>*</span></label>
+            <select value={drugsUsed} onChange={(e) => setDrugsUsed(e.target.value)} required>
+              <option value="" disabled>Select</option>
+              <option value="NO">No</option>
+              <option value="YES">Yes</option>
+            </select>
+          </div>
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <label>Notes{drugsUsed === 'YES' ? <span style={{ color: 'var(--red)' }}> *</span> : ''}</label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} required={drugsUsed === 'YES'}
+              placeholder={drugsUsed === 'YES' ? 'What was used, and the incident / patient record reference' : ''} />
+          </div>
+        </div>
+        {(sealIntact === 'NO' || drugsUsed === 'YES' || mismatch) && (
+          <div className="warning-banner" style={{ marginTop: 8 }}>The bag will be marked “Needs restock / check” and can't be signed out again until it's restocked and resealed.</div>
+        )}
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Sign bag in'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function RestockBagModal({ bag, onClose, onSaved }) {
+  const [sealNumber, setSealNumber] = useState('');
+  const [expiryDate, setExpiryDate] = useState('');
+  const [notes, setNotes] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      onSaved(await api.restockDrugBag(bag.id, { sealNumber, expiryDate, notes }));
+    } catch (err) {
+      setError(err.message || 'Failed to restock bag');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={handleSubmit} style={{ maxWidth: 520 }}>
+        <div className="modal-header">
+          <h2>Restock and reseal {bag.bagNumber}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field">
+            <label>New seal number <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} required autoFocus />
+          </div>
+          <div className="form-field">
+            <label>Earliest expiry date in the bag <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} required />
+          </div>
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <label>What was replaced</label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Mark restocked'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// Add a bag, or view / edit one with its full history.
+function DrugBagModal({ bag, onClose, onSaved, onSignOut, onReturn, onRestock }) {
+  const isNew = !bag;
+  const [bagNumber, setBagNumber] = useState(bag?.bagNumber || '');
+  const [bagType, setBagType] = useState(bag?.bagType || DRUG_BAG_TYPES[0]);
+  const [sealNumber, setSealNumber] = useState(bag?.sealNumber || '');
+  const [expiryDate, setExpiryDate] = useState(bag?.expiryDate || '');
+  const [status, setStatus] = useState(bag?.status || 'AVAILABLE');
+  const [notes, setNotes] = useState(bag?.notes || '');
+  const [history, setHistory] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (bag) api.getDrugBagHistory(bag.id).then(setHistory).catch(() => setHistory({ movements: [], events: [] }));
+  }, [bag]);
+
+  async function save(extra = {}) {
+    setError('');
+    setBusy(true);
+    try {
+      const data = { bagNumber, bagType, sealNumber, expiryDate: expiryDate || null, notes, status, ...extra };
+      const saved = isNew ? await api.createDrugBag(data) : await api.updateDrugBag(bag.id, data);
+      onSaved(saved, isNew);
+    } catch (err) {
+      setError(err.message || 'Failed to save bag');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={(e) => { e.preventDefault(); save(); }} style={{ maxWidth: 720 }}>
+        <div className="modal-header">
+          <h2>{isNew ? 'Add a drug bag' : `Drug bag ${bag.bagNumber}`}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        {!isNew && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+            <span className={'badge ' + (DRUG_BAG_STATUS_BADGE[bag.status] || 'badge-grey')}>{bag.statusLabel}</span>
+            {bag.current && <span className="muted" style={{ fontSize: 13 }}>With {bag.current.signedOutTo} since {fmtDate(bag.current.signedOutAt)} {fmtTime(bag.current.signedOutAt)}</span>}
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+              {bag.active && bag.status === 'AVAILABLE' && bag.expiryStatus !== 'OVERDUE' && <button type="button" className="btn btn-primary btn-sm" onClick={() => onSignOut(bag)}>Sign out</button>}
+              {bag.current && <button type="button" className="btn btn-primary btn-sm" onClick={() => onReturn(bag)}>Sign in</button>}
+              {bag.active && !bag.current && (bag.status === 'RESTOCK' || (bag.status === 'AVAILABLE' && bag.expiryStatus === 'OVERDUE')) && <button type="button" className="btn btn-ghost btn-sm" onClick={() => onRestock(bag)}>Restock</button>}
+            </div>
+          </div>
+        )}
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Bag number <span style={{ color: 'var(--red)' }}>*</span></label>
+            <input value={bagNumber} onChange={(e) => setBagNumber(e.target.value)} placeholder="e.g. DB-014" required autoFocus={isNew} />
+          </div>
+          <div className="form-field">
+            <label>Bag type</label>
+            <select value={DRUG_BAG_TYPES.includes(bagType) ? bagType : 'Other'} onChange={(e) => setBagType(e.target.value)}>
+              {DRUG_BAG_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div className="form-field">
+            <label>Current seal number</label>
+            <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} />
+          </div>
+          <div className="form-field">
+            <label>Earliest expiry date in the bag</label>
+            <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
+          </div>
+          {!isNew && !bag.current && (
+            <div className="form-field">
+              <label>Status</label>
+              <select value={status} onChange={(e) => setStatus(e.target.value)}>
+                <option value="AVAILABLE">Available</option>
+                <option value="RESTOCK">Needs restock / check</option>
+                <option value="OUT_OF_SERVICE">Out of service</option>
+              </select>
+            </div>
+          )}
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <label>Notes</label>
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
+          </div>
+        </div>
+
+        {!isNew && (
+          <>
+            <div className="settings-section-title settings-section-spaced">History</div>
+            {!history ? <div className="muted">Loading…</div> : history.events.length === 0 ? (
+              <div className="muted">No history yet.</div>
+            ) : (
+              <div className="kpi-list" style={{ maxHeight: 260, overflowY: 'auto' }}>
+                {history.events.map((e) => (
+                  <div key={e.id} className="kpi-list-row" style={{ alignItems: 'flex-start' }}>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{e.action.replace(/_/g, ' ')}</div>
+                      <div style={{ fontSize: 13 }}>{e.details}</div>
+                    </div>
+                    <div className="muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{fmtDate(e.createdAt)} {fmtTime(e.createdAt)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="modal-footer">
+          <div>
+            {!isNew && bag.active && !bag.current && (
+              <button type="button" className="btn btn-ghost" disabled={busy}
+                onClick={() => { if (confirm(`Archive drug bag ${bag.bagNumber}? It will be hidden from the list and can't be signed out. Its history is kept.`)) save({ active: false }); }}>
+                Archive
+              </button>
+            )}
+            {!isNew && !bag.active && (
+              <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => save({ active: true })}>Restore</button>
+            )}
+          </div>
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : isNew ? 'Add bag' : 'Save changes'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function FleetManagement() {
   const [tab, setTab] = useState('vehicles');
   const [summary, setSummary] = useState(null);
@@ -5233,6 +5960,7 @@ function AppRoutes() {
                 <Route path="/actions" element={<AdminRoute><Actions /></AdminRoute>} />
                 <Route path="/safety-alerts" element={<SafetyAlerts />} />
                 <Route path="/fleet" element={<AdminRoute><FleetManagement /></AdminRoute>} />
+                <Route path="/medication" element={<AdminRoute><Medication /></AdminRoute>} />
                 <Route path="/staff" element={<AdminRoute><Staff /></AdminRoute>} />
                 <Route path="/case-notes" element={<AdminRoute><CaseNotes /></AdminRoute>} />
                 <Route path="/settings" element={<Settings />} />
