@@ -593,6 +593,7 @@ const api = {
   archiveSafetyAlert: (id) => request(`/safety-alerts/${id}`, { method: 'PUT', body: { active: false } }),
   runDigest: () => request('/digest/run', { method: 'POST' }),
   getMedStoreSummary: () => request('/med-store/summary'),
+  getMedDashboard: () => request('/med-store/dashboard'),
   listMedItems: (archived) => request('/med-store/items', { params: { archived: archived ? 1 : undefined } }),
   createMedItem: (data) => request('/med-store/items', { method: 'POST', body: data }),
   updateMedItem: (id, data) => request(`/med-store/items/${id}`, { method: 'PUT', body: data }),
@@ -765,6 +766,7 @@ function buildNav(isAdmin) {
   nav.push({ section: 'SAFETY & COMPLIANCE', items: safety });
   if (isAdmin) {
     nav.push({ section: 'MEDICATION', items: [
+      { to: '/medication-dashboard', label: 'Medication Dashboard', icon: '📈' },
       { to: '/medication', label: 'Drug Bag Sign In / Sign Out', icon: '💊' },
       { to: '/medication-store', label: 'Medication Store', icon: '📦' },
     ] });
@@ -790,6 +792,7 @@ function Layout({ children }) {
   const location = useLocation();
   const pageTitle = location.pathname.startsWith('/fleet') ? 'Fleet Management'
     : location.pathname.startsWith('/medication-store') ? 'Medication Store'
+    : location.pathname.startsWith('/medication-dashboard') ? 'Medication Dashboard'
     : location.pathname.startsWith('/medication') ? 'Medication' : 'Incident Reporting';
 
   return (
@@ -3717,11 +3720,11 @@ function DashBarRow({ label, count, max, color }) {
   );
 }
 
-function TrendChart({ weeks }) {
+function TrendChart({ weeks, color = '#2563eb', noun = 'incident', ariaLabel = 'Incidents reported per week, last 12 weeks' }) {
   const width = 640;
   const height = 160;
-  const padLeft = 4;
-  const padRight = 4;
+  const padLeft = 22;
+  const padRight = 22;
   const padTop = 16;
   const padBottom = 26;
   const plotW = width - padLeft - padRight;
@@ -3740,19 +3743,19 @@ function TrendChart({ weeks }) {
   const baselineY = padTop + plotH;
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="dash-trend-svg" role="img" aria-label="Incidents reported per week, last 12 weeks">
+    <svg viewBox={`0 0 ${width} ${height}`} className="dash-trend-svg" role="img" aria-label={ariaLabel}>
       <line x1={padLeft} y1={baselineY} x2={width - padRight} y2={baselineY} stroke="#e5e7eb" strokeWidth="1" />
-      <path d={areaPath} fill="#2563eb" opacity="0.1" />
-      <path d={linePath} fill="none" stroke="#2563eb" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      <path d={areaPath} fill={color} opacity="0.1" />
+      <path d={linePath} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
       {points.map((p, i) => (
         <g key={i}>
-          <circle cx={p.x} cy={p.y} r={i === points.length - 1 ? 5 : 3.5} fill="#2563eb" stroke="#fff" strokeWidth="2" />
-          <title>{`${shortDate(p.weekStart)}: ${p.count} incident${p.count === 1 ? '' : 's'}`}</title>
+          <circle cx={p.x} cy={p.y} r={i === points.length - 1 ? 5 : 3.5} fill={color} stroke="#fff" strokeWidth="2" />
+          <title>{`Week of ${shortDate(new Date(p.weekStart))}: ${p.count} ${noun}${p.count === 1 ? '' : 's'}`}</title>
           {i === points.length - 1 && (
             <text x={p.x} y={p.y - 12} textAnchor="end" fontSize="12" fontWeight="700" fill="#111827">{p.count}</text>
           )}
           {(i % 2 === 0 || i === points.length - 1) && (
-            <text x={p.x} y={height - 6} textAnchor="middle" fontSize="10" fill="#6b7280">{shortDate(p.weekStart)}</text>
+            <text x={p.x} y={height - 6} textAnchor="middle" fontSize="10" fill="#6b7280">{shortDate(new Date(p.weekStart))}</text>
           )}
         </g>
       ))}
@@ -6072,6 +6075,238 @@ function MedBatchActionModal({ item, batch, op, onClose, onSaved }) {
   );
 }
 
+// =====================================================================
+// Medication dashboard: drug bags + medication store at a glance.
+// =====================================================================
+
+function MedPanel({ title, sub, children, action }) {
+  return (
+    <div className="card kpi-panel">
+      <div className="kpi-panel-header">
+        <div className="kpi-panel-title">{title}</div>
+        {action || (sub ? <div className="muted">{sub}</div> : null)}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function MedActionList({ rows, empty, render }) {
+  if (!rows.length) return <div className="empty" style={{ padding: '14px 0' }}>{empty}</div>;
+  return (
+    <div className="kpi-list" style={{ maxHeight: 260, overflowY: 'auto' }}>
+      {rows.map((r, i) => <div key={i} className="kpi-list-row">{render(r)}</div>)}
+    </div>
+  );
+}
+
+function MedicationDashboard() {
+  const [d, setD] = useState(null);
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+
+  function load() {
+    setError('');
+    api.getMedDashboard().then(setD).catch((err) => setError(err.message || 'Failed to load the medication dashboard'));
+  }
+  useEffect(() => { load(); }, []);
+
+  if (error) return <div className="error-banner">{error}</div>;
+  if (!d) return <div className="page-loading">Loading…</div>;
+
+  const st = d.store;
+  const bg = d.bags;
+  const short = (x) => (x ? new Date(x).toLocaleDateString('en-GB') : '');
+  const maxOf = (rows) => Math.max(1, ...rows.map((r) => r.count));
+  const outlookMax = Math.max(1, d.expiryOutlook.expiredBatches, ...d.expiryOutlook.months.map((m) => m.batches));
+  const attention = st.lowStock + st.outOfStock + st.expiredBatches + bg.restock + bg.outTooLong + bg.expiryIssues;
+  const goStore = () => navigate('/medication-store');
+  const goBags = () => navigate('/medication');
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Medication Dashboard</h1>
+          <div className="page-sub">Drug bags and the medication store at a glance · updated {fmtTime(d.generatedAt)}</div>
+        </div>
+        <div className="page-header-actions">
+          <button className="btn btn-ghost" onClick={load}>Refresh</button>
+          <button className="btn btn-ghost" onClick={goBags}>Drug bags</button>
+          <button className="btn btn-primary" onClick={goStore}>Medication store</button>
+        </div>
+      </div>
+
+      <div className={attention ? 'warning-banner' : 'success-banner'} style={{ marginBottom: 14 }}>
+        {attention
+          ? <><strong>{attention} item{attention === 1 ? '' : 's'} need attention</strong> — see the action lists below.</>
+          : <><strong>All clear</strong> — stock is above minimum, nothing has expired and no bags need action.</>}
+      </div>
+
+      <div className="settings-section-title">Drug bags</div>
+      <div className="kpi-grid">
+        <div className="kpi-card kpi-card-green row-clickable" onClick={goBags}>
+          <div className="kpi-value">{bg.available}/{bg.total}</div>
+          <div className="kpi-label">Bags available</div>
+          <div className="kpi-sub">Sealed, in date, ready to go</div>
+        </div>
+        <div className={'kpi-card row-clickable ' + (bg.outTooLong ? 'kpi-card-amber' : '')} onClick={goBags}>
+          <div className="kpi-value">{bg.signedOut}</div>
+          <div className="kpi-label">Signed out</div>
+          <div className="kpi-sub">{bg.outTooLong} out longer than {d.outTooLongHours} hours</div>
+        </div>
+        <div className={'kpi-card row-clickable ' + (bg.restock ? 'kpi-card-amber' : 'kpi-card-green')} onClick={goBags}>
+          <div className="kpi-value">{bg.restock}</div>
+          <div className="kpi-label">Bags to restock</div>
+          <div className="kpi-sub">Used, or seal broken or changed</div>
+        </div>
+        <div className={'kpi-card row-clickable ' + (d.bagsExpiry.some((b) => b.expiryStatus === 'OVERDUE') ? 'kpi-card-red' : bg.expiryIssues ? 'kpi-card-amber' : 'kpi-card-green')} onClick={goBags}>
+          <div className="kpi-value">{bg.expiryIssues}</div>
+          <div className="kpi-label">Bags with expiring items</div>
+          <div className="kpi-sub">Expired or within 30 days</div>
+        </div>
+      </div>
+
+      <div className="settings-section-title" style={{ marginTop: 6 }}>Medication store</div>
+      <div className="kpi-grid">
+        <div className="kpi-card row-clickable" onClick={goStore}>
+          <div className="kpi-value">{st.items}</div>
+          <div className="kpi-label">Medicines stocked</div>
+          <div className="kpi-sub">Lines in the store</div>
+        </div>
+        <div className={'kpi-card row-clickable ' + (st.outOfStock ? 'kpi-card-red' : st.lowStock ? 'kpi-card-amber' : 'kpi-card-green')} onClick={goStore}>
+          <div className="kpi-value">{st.lowStock + st.outOfStock}</div>
+          <div className="kpi-label">To reorder</div>
+          <div className="kpi-sub">{st.outOfStock} out of stock</div>
+        </div>
+        <div className={'kpi-card row-clickable ' + (st.expiredBatches ? 'kpi-card-red' : 'kpi-card-green')} onClick={goStore}>
+          <div className="kpi-value">{st.expiredBatches}</div>
+          <div className="kpi-label">Expired batches</div>
+          <div className="kpi-sub">{d.expiryOutlook.expiredQty} items to dispose of</div>
+        </div>
+        <div className={'kpi-card row-clickable ' + (st.expiringSoonBatches ? 'kpi-card-amber' : 'kpi-card-green')} onClick={goStore}>
+          <div className="kpi-value">{st.expiringSoonBatches}</div>
+          <div className="kpi-label">Expiring in 30 days</div>
+          <div className="kpi-sub">Use these first</div>
+        </div>
+      </div>
+
+      <div className="kpi-panels">
+        <MedPanel title="Reorder list" sub="Below minimum stock">
+          <MedActionList rows={d.reorder} empty="Everything is at or above its minimum."
+            render={(r) => (
+              <>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{r.item}</div>
+                  <div className="muted" style={{ fontSize: 12 }}>{r.usableQty} in stock · minimum {r.minQty}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <span className={'badge ' + (r.status === 'OUT' ? 'badge-red' : 'badge-amber')}>{r.status === 'OUT' ? 'Out of stock' : 'Low'}</span>
+                  <div style={{ fontSize: 12, marginTop: 2 }}>Order at least <strong>{r.shortfall}</strong> {r.unit}</div>
+                </div>
+              </>
+            )} />
+        </MedPanel>
+
+        <MedPanel title="Expired stock" sub="Remove and dispose of">
+          <MedActionList rows={d.expired} empty="No expired stock in the store."
+            render={(b) => (
+              <>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{b.item}</div>
+                  <div className="muted" style={{ fontSize: 12 }}>Batch {b.batchNumber || '—'} · {b.quantity} {b.unit}</div>
+                </div>
+                <span className="badge badge-red" style={{ whiteSpace: 'nowrap' }}>Expired {short(b.expiryDate)}</span>
+              </>
+            )} />
+        </MedPanel>
+
+        <MedPanel title="Expiring in the next 30 days" sub="Use first">
+          <MedActionList rows={d.expiringSoon} empty="Nothing expires in the next 30 days."
+            render={(b) => (
+              <>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{b.item}</div>
+                  <div className="muted" style={{ fontSize: 12 }}>Batch {b.batchNumber || '—'} · {b.quantity} {b.unit}</div>
+                </div>
+                <span className="badge badge-amber" style={{ whiteSpace: 'nowrap' }}>{short(b.expiryDate)}</span>
+              </>
+            )} />
+        </MedPanel>
+
+        <MedPanel title="Drug bags needing action">
+          <MedActionList
+            rows={[
+              ...d.bagsOutLong.map((b) => ({ kind: 'out', ...b })),
+              ...d.bagsRestock.map((b) => ({ kind: 'restock', ...b })),
+              ...d.bagsExpiry.map((b) => ({ kind: 'expiry', ...b })),
+            ]}
+            empty="No drug bags need action."
+            render={(b) => (
+              <>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{b.bagNumber}</div>
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {b.kind === 'out' && <>With {b.to}{b.callSign ? ` (${b.callSign})` : ''} since {short(b.signedOutAt)} {fmtTime(b.signedOutAt)}</>}
+                    {b.kind === 'restock' && 'Restock and reseal before next use'}
+                    {b.kind === 'expiry' && <>Earliest expiry {short(b.expiryDate)}{b.signedOut ? ' · currently signed out' : ''}</>}
+                  </div>
+                </div>
+                {b.kind === 'out' && <span className="badge badge-amber">Out over {d.outTooLongHours}h</span>}
+                {b.kind === 'restock' && <span className="badge badge-amber">Restock</span>}
+                {b.kind === 'expiry' && <span className={'badge ' + (b.expiryStatus === 'OVERDUE' ? 'badge-red' : 'badge-amber')}>{b.expiryStatus === 'OVERDUE' ? 'Expired' : 'Expiring'}</span>}
+              </>
+            )} />
+        </MedPanel>
+      </div>
+
+      <div className="kpi-panels" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))' }}>
+        <div className="card">
+          <div className="kpi-panel-header">
+            <div className="kpi-panel-title">Stock issued per week</div>
+            <div className="muted">Items issued from the store · last 12 weeks</div>
+          </div>
+          <TrendChart weeks={d.issuedWeekly} color="#0f766e" noun="item" ariaLabel="Medication stock issued per week, last 12 weeks" />
+        </div>
+        <div className="card">
+          <div className="kpi-panel-header">
+            <div className="kpi-panel-title">Drug bag sign-outs per week</div>
+            <div className="muted">Last 12 weeks</div>
+          </div>
+          <TrendChart weeks={d.signOutsWeekly} color="#7c3aed" noun="sign-out" ariaLabel="Drug bag sign-outs per week, last 12 weeks" />
+        </div>
+      </div>
+
+      <div className="kpi-panels">
+        <MedPanel title="Most issued medicines" sub="Last 30 days">
+          {d.topIssued.length === 0 ? <div className="empty">Nothing issued in the last 30 days.</div>
+            : d.topIssued.map((r) => <DashBarRow key={r.label} label={r.label} count={r.count} max={maxOf(d.topIssued)} color="#0f766e" />)}
+        </MedPanel>
+        <MedPanel title="What stock was issued for" sub="Last 30 days, items">
+          {d.issuedByReason.length === 0 ? <div className="empty">Nothing issued in the last 30 days.</div>
+            : d.issuedByReason.map((r) => <DashBarRow key={r.label} label={r.label} count={r.count} max={maxOf(d.issuedByReason)} color="#0f766e" />)}
+        </MedPanel>
+        <MedPanel title="Waste" sub="Disposed in the last 90 days, by reason">
+          {d.wasteByReason.length === 0 ? <div className="empty">No stock disposed of in the last 90 days.</div>
+            : d.wasteByReason.map((r) => <DashBarRow key={r.label} label={r.label} count={r.count} max={maxOf(d.wasteByReason)} color="#b45309" />)}
+          {d.wasteByItem.length > 0 && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+              Most wasted: {d.wasteByItem.slice(0, 3).map((w) => `${w.label} (${w.count} ${w.unit})`).join(', ')}
+            </div>
+          )}
+        </MedPanel>
+        <MedPanel title="Expiry outlook" sub="Batches in stock by expiry month">
+          <DashBarRow label="Already expired" count={d.expiryOutlook.expiredBatches} max={outlookMax} color="#dc2626" />
+          {d.expiryOutlook.months.map((m) => (
+            <DashBarRow key={m.key} label={m.label} count={m.batches} max={outlookMax} color="#64748b" />
+          ))}
+          <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>Number of batches; plan stock rotation for busy months.</div>
+        </MedPanel>
+      </div>
+    </div>
+  );
+}
+
 function FleetManagement() {
   const [tab, setTab] = useState('vehicles');
   const [summary, setSummary] = useState(null);
@@ -6590,6 +6825,7 @@ function AppRoutes() {
                 <Route path="/fleet" element={<AdminRoute><FleetManagement /></AdminRoute>} />
                 <Route path="/medication" element={<AdminRoute><Medication /></AdminRoute>} />
                 <Route path="/medication-store" element={<AdminRoute><MedicationStore /></AdminRoute>} />
+                <Route path="/medication-dashboard" element={<AdminRoute><MedicationDashboard /></AdminRoute>} />
                 <Route path="/staff" element={<AdminRoute><Staff /></AdminRoute>} />
                 <Route path="/case-notes" element={<AdminRoute><CaseNotes /></AdminRoute>} />
                 <Route path="/settings" element={<Settings />} />

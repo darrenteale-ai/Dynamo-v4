@@ -4076,6 +4076,110 @@ async function handleMedStoreRequest(req: Request, url: URL, path: string, metho
 
   if (path === "/api/med-store/summary" && method === "GET") return json(await medStoreSummary());
 
+  // Everything the Medication Dashboard shows, in one request.
+  if (path === "/api/med-store/dashboard" && method === "GET") {
+    const OUT_TOO_LONG_HOURS = 24;
+    const items = ((await medItemRows(null, false)) as any[]).map(serializeMedItem);
+    const bags = ((await listDrugBags(false)) as any[]).map(serializeDrugBag);
+    const label = (i: any) => [i.name, i.strength].filter(Boolean).join(" ");
+
+    const allBatches = items.flatMap((i) => i.batches.map((b: any) => ({ ...b, itemId: i.id, item: label(i), unit: i.unit })));
+    const reorder = items
+      .filter((i) => i.stockStatus !== "OK")
+      .map((i) => ({ id: i.id, item: label(i), form: i.form, unit: i.unit, usableQty: i.usableQty, minQty: i.minQty, shortfall: Math.max(i.minQty - i.usableQty, 0), status: i.stockStatus }))
+      .sort((a, b) => (a.status === b.status ? b.shortfall - a.shortfall : a.status === "OUT" ? -1 : 1));
+    const expired = allBatches.filter((b) => b.expiryStatus === "OVERDUE").sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
+    const expiringSoon = allBatches.filter((b) => b.expiryStatus === "DUE_SOON").sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
+
+    const now = Date.now();
+    const bagsOutLong = bags
+      .filter((b) => b.current && now - new Date(b.current.signedOutAt).getTime() > OUT_TOO_LONG_HOURS * 3600000)
+      .map((b) => ({ id: b.id, bagNumber: b.bagNumber, to: b.current.signedOutTo, vehicleReg: b.current.vehicleReg, callSign: b.current.callSign, signedOutAt: b.current.signedOutAt }));
+    const bagsRestock = bags.filter((b) => !b.current && b.status === "RESTOCK").map((b) => ({ id: b.id, bagNumber: b.bagNumber }));
+    const bagsExpiry = bags
+      .filter((b) => b.expiryStatus === "OVERDUE" || b.expiryStatus === "DUE_SOON")
+      .map((b) => ({ id: b.id, bagNumber: b.bagNumber, expiryDate: b.expiryDate, expiryStatus: b.expiryStatus, signedOut: !!b.current }));
+
+    // Weekly series for the last 12 weeks (Monday-start), zero-filled.
+    const weekly = async (rows: any[]) => {
+      const map = new Map(rows.map((r: any) => [toDateStr(r.wk), Number(r.n)]));
+      const out: { weekStart: string; count: number }[] = [];
+      const monday = new Date();
+      monday.setUTCHours(0, 0, 0, 0);
+      monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+      for (let i = 11; i >= 0; i--) {
+        const d = new Date(monday.getTime() - i * 7 * 86400000).toISOString().slice(0, 10);
+        out.push({ weekStart: d, count: map.get(d) || 0 });
+      }
+      return out;
+    };
+    const issuedWeekly = await weekly(await sql`
+      SELECT date_trunc('week', created_at)::date AS wk, SUM(-quantity)::int AS n FROM med_movements
+      WHERE type = 'ISSUED' AND created_at >= now() - interval '12 weeks' GROUP BY 1
+    `);
+    const signOutsWeekly = await weekly(await sql`
+      SELECT date_trunc('week', signed_out_at)::date AS wk, COUNT(*)::int AS n FROM drug_bag_movements
+      WHERE signed_out_at >= now() - interval '12 weeks' GROUP BY 1
+    `);
+    const topIssued = await sql`
+      SELECT i.name, i.strength, i.unit, SUM(-m.quantity)::int AS n FROM med_movements m JOIN med_items i ON i.id = m.item_id
+      WHERE m.type = 'ISSUED' AND m.created_at >= now() - interval '30 days'
+      GROUP BY i.id, i.name, i.strength, i.unit ORDER BY n DESC LIMIT 8
+    `;
+    const issuedByReason = await sql`
+      SELECT COALESCE(reason, 'Not given') AS reason, SUM(-quantity)::int AS n FROM med_movements
+      WHERE type = 'ISSUED' AND created_at >= now() - interval '30 days' GROUP BY 1 ORDER BY n DESC
+    `;
+    const wasteByReason = await sql`
+      SELECT COALESCE(reason, 'Not given') AS reason, SUM(-quantity)::int AS n, COUNT(*)::int AS times FROM med_movements
+      WHERE type = 'DISPOSED' AND created_at >= now() - interval '90 days' GROUP BY 1 ORDER BY n DESC
+    `;
+    const wasteByItem = await sql`
+      SELECT i.name, i.strength, i.unit, SUM(-m.quantity)::int AS n FROM med_movements m JOIN med_items i ON i.id = m.item_id
+      WHERE m.type = 'DISPOSED' AND m.created_at >= now() - interval '90 days'
+      GROUP BY i.id, i.name, i.strength, i.unit ORDER BY n DESC LIMIT 6
+    `;
+    // Expiry outlook: in-stock batches by expiry month, next 6 months (plus already expired).
+    const months: { key: string; label: string; batches: number; qty: number }[] = [];
+    const start = new Date(); start.setUTCDate(1); start.setUTCHours(0, 0, 0, 0);
+    for (let i = 0; i < 6; i++) {
+      const d = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i, 1));
+      months.push({ key: d.toISOString().slice(0, 7), label: d.toLocaleDateString("en-GB", { month: "short", year: "numeric", timeZone: "UTC" }), batches: 0, qty: 0 });
+    }
+    for (const b of allBatches) {
+      if (b.expiryStatus === "OVERDUE") continue;
+      const m = months.find((x) => x.key === String(b.expiryDate).slice(0, 7));
+      if (m) { m.batches++; m.qty += b.quantity; }
+    }
+
+    return json({
+      generatedAt: new Date().toISOString(),
+      outTooLongHours: OUT_TOO_LONG_HOURS,
+      store: await medStoreSummary(),
+      bags: {
+        total: bags.length,
+        available: bags.filter((b) => b.status === "AVAILABLE" && b.expiryStatus !== "OVERDUE").length,
+        signedOut: bags.filter((b) => b.current).length,
+        restock: bagsRestock.length,
+        outTooLong: bagsOutLong.length,
+        expiryIssues: bagsExpiry.length,
+      },
+      reorder,
+      expired,
+      expiringSoon,
+      bagsOutLong,
+      bagsRestock,
+      bagsExpiry,
+      issuedWeekly,
+      signOutsWeekly,
+      topIssued: (topIssued as any[]).map((r) => ({ label: [r.name, r.strength].filter(Boolean).join(" "), unit: r.unit, count: r.n })),
+      issuedByReason: (issuedByReason as any[]).map((r) => ({ label: r.reason, count: r.n })),
+      wasteByReason: (wasteByReason as any[]).map((r) => ({ label: r.reason, count: r.n, times: r.times })),
+      wasteByItem: (wasteByItem as any[]).map((r) => ({ label: [r.name, r.strength].filter(Boolean).join(" "), unit: r.unit, count: r.n })),
+      expiryOutlook: { expiredBatches: expired.length, expiredQty: expired.reduce((n, b) => n + b.quantity, 0), months },
+    });
+  }
+
   if (path === "/api/med-store/items" && method === "GET") {
     return json(((await medItemRows(null, url.searchParams.get("archived") === "1")) as any[]).map(serializeMedItem));
   }
