@@ -557,9 +557,10 @@ const api = {
   resetStaffPasswords: (userIds) => request('/staff/reset-password', { method: 'POST', body: { userIds } }),
   getStaffProfile: (id) => request(`/staff/${id}`),
   listIncidents: () => request('/incidents'),
-  // view=1 records an "opened" entry in the audit trail; view=0 is used for
-  // the incident window refreshing itself after a save or upload.
-  getIncident: (id, opts = {}) => request(`/incidents/${id}?view=${opts.opened ? 1 : 0}`),
+  // Opening an incident needs a reason (recorded in the audit trail) unless
+  // you're its assigned investigator; getIncident refreshes an open incident.
+  openIncident: (id, reason) => request(`/incidents/${id}/open`, { method: 'POST', body: { reason } }),
+  getIncident: (id) => request(`/incidents/${id}`),
   createIncident: (data) => request('/incidents', { method: 'POST', body: data }),
   createPublicIncident: (formData) => uploadRequest('/public/incidents', formData),
   updateIncident: (id, data) => request(`/incidents/${id}`, { method: 'PUT', body: data }),
@@ -1105,6 +1106,70 @@ function toIncidentDateInput(value) {
   return d.toISOString().slice(0, 10);
 }
 
+// Asked before an incident opens: why are you opening it? The reason is
+// saved in the incident's audit trail with your name and the time.
+const OPEN_REASON_SHORTCUTS = [
+  'Investigating this incident',
+  'Reviewing for sign-off',
+  'Allocating a responsible manager',
+  'Regulatory reporting (RIDDOR / CQC / duty of candour)',
+  'Responding to a query or complaint',
+  'Audit or governance review',
+  'Data protection request',
+];
+
+function OpenReasonModal({ incident, onClose, onOpened }) {
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    if (reason.trim().length < 5) { setError('Please give a reason (at least 5 characters).'); return; }
+    setBusy(true);
+    try {
+      onOpened(await api.openIncident(incident.id, reason.trim()));
+    } catch (err) {
+      setError(err.message || 'Could not open the incident');
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={handleSubmit} style={{ maxWidth: 560 }}>
+        <div className="modal-header">
+          <h2>Open incident {incident.ref}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="muted" style={{ fontSize: 13 }}>
+          Incident reports can contain patient and staff information. Your reason, name and the time are
+          recorded in the incident's audit trail.
+        </div>
+        <div className="form-field">
+          <label>Reason for opening <span style={{ color: 'var(--red)' }}>*</span></label>
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} required autoFocus maxLength={500}
+            placeholder="e.g. Reviewing the investigation before sign-off" />
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {OPEN_REASON_SHORTCUTS.map((r) => (
+            <button type="button" key={r} className="btn btn-ghost btn-sm" onClick={() => setReason(r)}>{r}</button>
+          ))}
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Opening…' : 'Open incident'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function IncidentDetailModal({ incident, onClose, onSaved }) {
   const { user } = useAuth();
   const isAdmin = isMgrOrAdmin(user?.role);
@@ -1267,8 +1332,8 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
     setSeverityTouched(true);
   }
 
-  function reload(opened = false) {
-    return api.getIncident(incident.id, { opened }).then(applyFull);
+  function reload() {
+    return api.getIncident(incident.id).then(applyFull);
   }
 
   function reloadAudit() {
@@ -1280,7 +1345,8 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
   }
 
   useEffect(() => {
-    reload(true).finally(reloadAudit);
+    // The incident was opened (and logged) before this window appeared.
+    reload().finally(reloadAudit);
     reloadActions();
     if (isAdmin) {
       api.listStaff().then((rows) => setManagers(rows.filter((s) => s.role === 'ADMIN' || s.role === 'MANAGER'))).catch(() => {});
@@ -3034,6 +3100,27 @@ const EMPTY_FILTERS = { status: '', severity: '', category: '', managerId: '', f
 
 function Incidents() {
   const { user } = useAuth();
+  const [opening, setOpening] = useState(null);
+  const [openError, setOpenError] = useState('');
+
+  // Opening an incident: the assigned investigator goes straight in (still
+  // recorded in the audit trail); everyone else is asked for a reason.
+  function isInvestigatorFor(i) {
+    const n = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    return !!n(i.investigatorName) && n(i.investigatorName) === n(user?.name);
+  }
+  async function requestOpen(i) {
+    setOpenError('');
+    if (isInvestigatorFor(i)) {
+      try {
+        setViewing(await api.openIncident(i.id, ''));
+        return;
+      } catch (err) {
+        if (!err.message || !/reason/i.test(err.message)) { setOpenError(err.message || 'Could not open incident'); return; }
+      }
+    }
+    setOpening(i);
+  }
   const isAdmin = isMgrOrAdmin(user?.role);
   const [incidents, setIncidents] = useState([]);
   const [managers, setManagers] = useState([]);
@@ -3074,7 +3161,7 @@ function Incidents() {
     if (filters.regAction && !hasComplianceAction(i)) return false;
     if (filters.q) {
       const q = filters.q.trim().toLowerCase();
-      const haystack = [i.ref, i.description, i.location, i.reporterName, i.investigatorName, i.cadRef, i.callSign, i.vehicleReg]
+      const haystack = [i.ref, i.location, i.reporterName, i.notifiedBy, i.investigatorName, i.responsibleManagerName, i.cadRef, i.callSign, i.vehicleReg]
         .filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(q)) return false;
     }
@@ -3118,7 +3205,7 @@ function Incidents() {
           <label>Search</label>
           <input
             type="text"
-            placeholder="Ref, description, location, investigator…"
+            placeholder="Ref, location, reporter, investigator…"
             value={filters.q}
             onChange={(e) => setFilters({ ...filters, q: e.target.value })}
           />
@@ -3215,7 +3302,7 @@ function Incidents() {
             </thead>
             <tbody>
               {filtered.map((i) => (
-                <tr key={i.id} className="row-clickable" onClick={() => setViewing(i)}>
+                <tr key={i.id} className="row-clickable" onClick={() => requestOpen(i)}>
                   <td><span className="ref-link">{i.ref}</span></td>
                   <td>{fmtDate(i.occurredAt)} {fmtTime(i.occurredAt)}</td>
                   <td>{i.location || '—'}</td>
@@ -3247,6 +3334,18 @@ function Incidents() {
           onClose={() => setCreating(false)}
           onSaved={() => { setCreating(false); load(); }}
         />
+      )}
+
+      {opening && (
+        <OpenReasonModal
+          incident={opening}
+          onClose={() => setOpening(null)}
+          onOpened={(full) => { setOpening(null); setViewing(full); }}
+        />
+      )}
+      {openError && (
+        <div className="error-banner" style={{ position: 'fixed', bottom: 16, right: 16, zIndex: 2000, maxWidth: 420 }}
+          onClick={() => setOpenError('')}>{openError}</div>
       )}
 
       {viewing && (
@@ -4047,7 +4146,7 @@ function Dashboard() {
                   <td>{CATEGORY_LABELS[i.category] || '—'}</td>
                   <td><span className={'badge ' + severityBadgeClass(i.severity)}>{i.severity}</span></td>
                   <td><span className={'badge ' + statusBadgeClass(i.status)}>{i.status}</span></td>
-                  <td>{i.reporterName || (i.reporterEmail ? i.reporterEmail : 'Public report')}</td>
+                  <td>{i.reporterName || i.notifiedBy || 'Public report'}</td>
                 </tr>
               ))}
             </tbody>

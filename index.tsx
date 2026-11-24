@@ -1388,30 +1388,42 @@ async function logIncidentAudit(incidentId: number, auth: any, action: string, d
   `;
 }
 
-// Records that a staff member opened an incident (even just to read it).
-// The incident window asks for ?view=1 when it is opened, and ?view=0 when
-// it refreshes itself after a save or upload, so every open is recorded and
-// the automatic refreshes are not. A request with no view parameter (a page
-// loaded before this change) is recorded unless the same person was
-// recorded opening it in the last 2 minutes.
-async function logIncidentView(incidentId: number, auth: any, viewParam: string | null) {
-  if (!auth?.sub) return;
-  if (viewParam === "0") return;
-  if (viewParam !== "1") {
-    const [recent] = await sql`
-      SELECT id FROM incident_audit_log
-      WHERE incident_id = ${incidentId} AND action = 'VIEWED' AND actor_id = ${auth.sub}
-        AND created_at > now() - interval '2 minutes'
-      LIMIT 1
-    `;
-    if (recent) return;
-  }
-  await logIncidentAudit(incidentId, auth, "VIEWED", `Incident opened by ${auth.name}`);
+const LIST_HIDDEN_FIELDS = [
+  "description", "peopleInvolved", "crewNames", "reporterEmail", "adminNotes", "outcome",
+  "recommendations", "lessonsLearnt", "docNotes", "onCallManagerName", "signatureName",
+];
+function listSafeIncident(inc: any) {
+  const out = { ...inc };
+  for (const k of LIST_HIDDEN_FIELDS) delete out[k];
+  return out;
 }
 
-// Adds the same audit entry to many incidents in one statement — used when
-// incident details leave Dynamo in bulk (summary report, subject access
-// export), so each incident's trail shows it was included.
+// ---- Opening an incident: reason required, logged in the audit trail ----
+// Staff must give a reason to open an incident (POST /api/incidents/:id/open).
+// The assigned investigator (investigator name matches their own name) can
+// open it without one. The incident window's own refreshes (GET) are only
+// allowed for someone who opened it within OPEN_SESSION_HOURS.
+const OPEN_SESSION_HOURS = 12;
+
+function samePerson(a: any, b: any) {
+  const n = (v: any) => String(v ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  return !!n(a) && n(a) === n(b);
+}
+
+function isAssignedInvestigator(row: any, auth: any) {
+  return samePerson(row.investigator_name, auth?.name);
+}
+
+async function openedRecently(incidentId: number, auth: any) {
+  const [recent] = await sql`
+    SELECT id FROM incident_audit_log
+    WHERE incident_id = ${incidentId} AND action = 'VIEWED' AND actor_id = ${auth.sub}
+      AND created_at > now() - make_interval(hours => ${OPEN_SESSION_HOURS})
+    LIMIT 1
+  `;
+  return !!recent;
+}
+
 async function logBulkIncidentAudit(incidentIds: number[], auth: any, action: string, details: string) {
   const ids = [...new Set(incidentIds.filter((n) => Number.isInteger(n)))];
   if (!ids.length) return;
@@ -4880,7 +4892,10 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
             `;
       const daysToRespond = await getDaysToRespond();
       const hoursToAllocate = await getHoursToAllocate();
-      return json(rows.map((r: any) => serializeIncident(r, daysToRespond, hoursToAllocate)));
+      // The list carries only what the list and dashboards show. Descriptions,
+      // people involved, crew names, notes and write-ups are only returned when
+      // someone opens the incident (with a reason, recorded in the audit trail).
+      return json(rows.map((r: any) => listSafeIncident(serializeIncident(r, daysToRespond, hoursToAllocate))));
     }
 
     if (path === "/api/public/incidents" && method === "POST") {
@@ -5058,10 +5073,11 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     }
 
     const incidentIdMatch = path.match(/^\/api\/incidents\/(\d+)$/);
-    if (incidentIdMatch && method === "GET") {
+    const incidentOpenMatch = path.match(/^\/api\/incidents\/(\d+)\/open$/);
+    if ((incidentIdMatch && method === "GET") || (incidentOpenMatch && method === "POST")) {
       const auth = await getAuth(req);
       if (!auth) return json({ error: "Unauthorized" }, 401);
-      const id = Number(incidentIdMatch[1]);
+      const id = Number((incidentIdMatch || incidentOpenMatch)![1]);
       const [row] = await sql`
         SELECT i.*, u.name AS reporter_name, m.name AS responsible_manager_name, rel.ref AS related_incident_ref FROM incidents i
         LEFT JOIN users u ON u.id = i.reported_by
@@ -5071,7 +5087,26 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       `;
       if (!row) return json({ error: "Not found" }, 404);
       if (!isMgrOrAdmin(auth) && row.reported_by !== auth.sub) return json({ error: "Forbidden" }, 403);
-      await logIncidentView(id, auth, url.searchParams.get("view"));
+      if (incidentOpenMatch) {
+        // Opening: a reason is required unless you're the assigned investigator.
+        const body = await req.json().catch(() => ({}));
+        const reason = cleanText(body.reason, 500);
+        const investigator = isAssignedInvestigator(row, auth);
+        if (!investigator && (!reason || reason.length < 5)) {
+          return json({ error: "Please give a reason for opening this incident (at least 5 characters).", reasonRequired: true }, 400);
+        }
+        await logIncidentAudit(
+          id,
+          auth,
+          "VIEWED",
+          investigator && !reason
+            ? `Incident opened by ${auth.name} (assigned investigator)`
+            : `Incident opened by ${auth.name}${investigator ? " (assigned investigator)" : ""} — reason: ${reason}`
+        );
+      } else if (!(await openedRecently(id, auth))) {
+        // Refreshes are only for an incident you've opened (with a reason).
+        return json({ error: "Open this incident from the incident list and give a reason for opening it.", reasonRequired: true }, 403);
+      }
       const daysToRespond = await getDaysToRespond();
       const hoursToAllocate = await getHoursToAllocate();
       const attachments = await sql`
