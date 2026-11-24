@@ -1400,8 +1400,8 @@ function listSafeIncident(inc: any) {
 
 // ---- Opening an incident: reason required, logged in the audit trail ----
 // Staff must give a reason to open an incident (POST /api/incidents/:id/open).
-// The assigned investigator (investigator name matches their own name) can
-// open it without one. The incident window's own refreshes (GET) are only
+// The assigned investigator (investigator name matches their own name) and
+// the responsible manager can open it without one. The incident window's own refreshes (GET) are only
 // allowed for someone who opened it within OPEN_SESSION_HOURS.
 const OPEN_SESSION_HOURS = 12;
 
@@ -5091,17 +5091,21 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         // Opening: a reason is required unless you're the assigned investigator.
         const body = await req.json().catch(() => ({}));
         const reason = cleanText(body.reason, 500);
-        const investigator = isAssignedInvestigator(row, auth);
-        if (!investigator && (!reason || reason.length < 5)) {
+        // The assigned investigator and the responsible manager don't need
+        // to give a reason; everyone else does.
+        const role = isAssignedInvestigator(row, auth)
+          ? "assigned investigator"
+          : row.responsible_manager_id && row.responsible_manager_id === auth.sub
+            ? "responsible manager"
+            : null;
+        if (!role && (!reason || reason.length < 5)) {
           return json({ error: "Please give a reason for opening this incident (at least 5 characters).", reasonRequired: true }, 400);
         }
         await logIncidentAudit(
           id,
           auth,
           "VIEWED",
-          investigator && !reason
-            ? `Incident opened by ${auth.name} (assigned investigator)`
-            : `Incident opened by ${auth.name}${investigator ? " (assigned investigator)" : ""} — reason: ${reason}`
+          `Incident opened by ${auth.name}${role ? ` (${role})` : ""}${reason ? ` — reason: ${reason}` : ""}`
         );
       } else if (!(await openedRecently(id, auth))) {
         // Refreshes are only for an incident you've opened (with a reason).

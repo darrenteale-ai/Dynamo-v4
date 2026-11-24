@@ -3103,15 +3103,18 @@ function Incidents() {
   const [opening, setOpening] = useState(null);
   const [openError, setOpenError] = useState('');
 
-  // Opening an incident: the assigned investigator goes straight in (still
-  // recorded in the audit trail); everyone else is asked for a reason.
-  function isInvestigatorFor(i) {
+  // Opening an incident: the assigned investigator and the responsible
+  // manager go straight in (still recorded in the audit trail); everyone
+  // else is asked for a reason.
+  function opensWithoutReason(i) {
     const n = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    return !!n(i.investigatorName) && n(i.investigatorName) === n(user?.name);
+    const investigator = !!n(i.investigatorName) && n(i.investigatorName) === n(user?.name);
+    const manager = !!i.responsibleManagerId && user?.id != null && Number(i.responsibleManagerId) === Number(user.id);
+    return investigator || manager;
   }
   async function requestOpen(i) {
     setOpenError('');
-    if (isInvestigatorFor(i)) {
+    if (opensWithoutReason(i)) {
       try {
         setViewing(await api.openIncident(i.id, ''));
         return;
