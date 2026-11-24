@@ -593,6 +593,9 @@ const api = {
   getSafetyAlertAcks: (id) => request(`/safety-alerts/${id}/acks`),
   archiveSafetyAlert: (id) => request(`/safety-alerts/${id}`, { method: 'PUT', body: { active: false } }),
   runDigest: () => request('/digest/run', { method: 'POST' }),
+  getPublicBagSetup: () => request('/public/drug-bags/setup'),
+  publicBagSignOut: (data) => request('/public/drug-bags/sign-out', { method: 'POST', body: data }),
+  publicBagSignIn: (data) => request('/public/drug-bags/sign-in', { method: 'POST', body: data }),
   getMedStoreSummary: () => request('/med-store/summary'),
   getMedDashboard: () => request('/med-store/dashboard'),
   listMedItems: (archived) => request('/med-store/items', { params: { archived: archived ? 1 : undefined } }),
@@ -4927,6 +4930,7 @@ function Medication() {
           <div className="page-sub">Drug bag tracking: sign out to crews, sign back in, restock and reseal</div>
         </div>
         <div className="page-header-actions">
+          <a className="btn btn-ghost" href="/medication/qr" target="_blank" rel="noopener" style={{ textDecoration: 'none' }}>Print QR codes</a>
           <button className="btn btn-ghost" onClick={() => setEditing('new')}>+ Add bag</button>
           <button className="btn btn-primary" onClick={() => setSigningOut({})}>Sign out a bag</button>
         </div>
@@ -4964,6 +4968,15 @@ function Medication() {
           </div>
         </div>
       )}
+
+      <div className="card" style={{ padding: '12px 16px', marginBottom: 14, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 320px', fontSize: 14 }}>
+          <strong>Crew QR sign out / sign in:</strong> crews scan a QR code (no login) to sign a bag out or back in themselves at{' '}
+          <a href="/drug-bag" target="_blank" rel="noopener">{window.location.origin}/drug-bag</a>.
+          Print a code for each bag — scanning it opens the form with that bag already chosen.
+        </div>
+        <a className="btn btn-primary btn-sm" href="/medication/qr" target="_blank" rel="noopener" style={{ textDecoration: 'none' }}>Print QR codes</a>
+      </div>
 
       <div className="tabs">
         <button className={'tab-btn' + (tab === 'bags' ? ' active' : '')} onClick={() => setTab('bags')}>Drug bags</button>
@@ -6894,6 +6907,215 @@ function PublicVdi() {
   );
 }
 
+// Crew drug bag sign out / sign in (QR code, no login).
+function PublicDrugBag() {
+  const [setup, setSetup] = useState(null);
+  const [mode, setMode] = useState('out'); // 'out' | 'in'
+  const [bagId, setBagId] = useState('');
+  const [name, setName] = useState('');
+  const [secondCrew, setSecondCrew] = useState('');
+  const [vehicleId, setVehicleId] = useState('');
+  const [callSign, setCallSign] = useState('');
+  const [sealNumber, setSealNumber] = useState('');
+  const [sealIntact, setSealIntact] = useState('');
+  const [drugsUsed, setDrugsUsed] = useState('');
+  const [notes, setNotes] = useState('');
+  const [confirmed, setConfirmed] = useState(false);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(null);
+
+  function load(preselect) {
+    return api.getPublicBagSetup().then((s) => {
+      setSetup(s);
+      if (preselect) {
+        const params = new URLSearchParams(window.location.search);
+        const key = (params.get('bag') || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        const match = key && s.bags.find((b) => b.bagNumber.replace(/[^A-Za-z0-9]/g, '').toUpperCase() === key);
+        if (match) {
+          setBagId(String(match.id));
+          if (match.state === 'SIGNED_OUT') setMode('in');
+        }
+      }
+    }).catch((err) => setError(err.message || 'Could not load the form'));
+  }
+  useEffect(() => { load(true); }, []);
+
+  const bags = setup ? setup.bags : [];
+  const selected = bags.find((b) => String(b.id) === bagId) || null;
+  const choices = bags.filter((b) => (mode === 'out' ? b.state === 'AVAILABLE' : b.state === 'SIGNED_OUT'));
+
+  function switchMode(m) {
+    setMode(m);
+    setError('');
+    if (selected && ((m === 'out' && selected.state !== 'AVAILABLE') || (m === 'in' && selected.state !== 'SIGNED_OUT'))) setBagId('');
+  }
+
+  function chooseVehicle(value) {
+    setVehicleId(value);
+    const v = setup.vehicles.find((x) => String(x.id) === value);
+    if (v?.callSign && !callSign) setCallSign(v.callSign);
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const res = mode === 'out'
+        ? await api.publicBagSignOut({ bagId: Number(bagId), signedOutTo: name, secondCrew, vehicleId: vehicleId || null, callSign, sealNumber })
+        : await api.publicBagSignIn({ bagId: Number(bagId), returnedBy: name, sealNumber, sealIntact: sealIntact === 'YES', drugsUsed: drugsUsed === 'YES', notes });
+      setDone(res);
+    } catch (err) {
+      setError(err.message || 'Something went wrong — please try again');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function reset() {
+    setBagId(''); setSealNumber(''); setSealIntact(''); setDrugsUsed(''); setNotes(''); setConfirmed(false);
+    setVehicleId(''); setCallSign(''); setSecondCrew(''); setDone(null); setError('');
+    load(false);
+  }
+
+  const brand = (
+    <div className="public-report-brand">
+      <div className="brand-icon brand-icon-light">
+        <span className="brand-icon-letter">D</span>
+        <span className="brand-icon-dot"></span>
+      </div>
+      DYNAMO
+    </div>
+  );
+
+  if (done) {
+    return (
+      <div className="public-report-page">
+        <div className="public-report-card">
+          {brand}
+          <h1>{done.action === 'SIGNED_OUT' ? 'Bag signed out' : 'Bag signed in'}</h1>
+          {done.action === 'SIGNED_OUT' && (
+            <div className="success-banner" style={{ marginTop: 10 }}>Drug bag {done.bagNumber} is signed out to you. Sign it back in with this form when you return it.</div>
+          )}
+          {done.action === 'RETURNED' && !done.needsRestock && (
+            <div className="success-banner" style={{ marginTop: 10 }}>Drug bag {done.bagNumber} is signed back in. Thank you.</div>
+          )}
+          {done.action === 'RETURNED' && done.needsRestock && (
+            <div className="warning-banner" style={{ marginTop: 10 }}>
+              Drug bag {done.bagNumber} is signed back in and marked for restock / check. Managers have been told.
+              {done.sealMismatch ? ' The seal number did not match the one it went out with.' : ''} Hand it to a manager or put it in the restock area.
+            </div>
+          )}
+          <button type="button" className="btn btn-primary" onClick={reset}>Done — another bag</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="public-report-page">
+      <form className="public-report-card" onSubmit={handleSubmit}>
+        {brand}
+        <h1>Drug bag sign out / sign in</h1>
+        <div className="page-sub">Record every drug bag you take or return</div>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button type="button" className={'btn ' + (mode === 'out' ? 'btn-primary' : 'btn-ghost')} style={{ flex: 1 }} onClick={() => switchMode('out')}>Sign out a bag</button>
+          <button type="button" className={'btn ' + (mode === 'in' ? 'btn-primary' : 'btn-ghost')} style={{ flex: 1 }} onClick={() => switchMode('in')}>Sign in (return) a bag</button>
+        </div>
+
+        {error && <div className="error-banner" style={{ marginTop: 10 }}>{error}</div>}
+
+        {!setup ? <div className="page-loading">Loading…</div> : (
+          <div className="form-grid" style={{ marginTop: 12 }}>
+            <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+              <label>Drug bag number</label>
+              <select value={bagId} onChange={(e) => setBagId(e.target.value)} required>
+                <option value="" disabled>{choices.length ? 'Choose the bag' : mode === 'out' ? 'No bags available to sign out' : 'No bags are signed out'}</option>
+                {choices.map((b) => <option key={b.id} value={b.id}>{b.bagNumber}{b.bagType ? ` — ${b.bagType}` : ''}</option>)}
+              </select>
+              {selected && selected.state === 'UNAVAILABLE' && (
+                <div style={{ fontSize: 13, marginTop: 4, color: 'var(--red)' }}>Bag {selected.bagNumber} can't be used: {selected.unavailableReason}. Speak to a manager.</div>
+              )}
+            </div>
+            <div className="form-field">
+              <label>Your name</label>
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" required />
+            </div>
+            {mode === 'out' && (
+              <div className="form-field">
+                <label>Crew mate (optional)</label>
+                <input value={secondCrew} onChange={(e) => setSecondCrew(e.target.value)} placeholder="Full name" />
+              </div>
+            )}
+            {mode === 'out' && (
+              <div className="form-field">
+                <label>Vehicle</label>
+                <select value={vehicleId} onChange={(e) => chooseVehicle(e.target.value)}>
+                  <option value="">Not on a vehicle</option>
+                  {setup.vehicles.map((v) => <option key={v.id} value={v.id}>{v.callSign ? `${v.callSign} — ${v.reg}` : v.reg}</option>)}
+                </select>
+              </div>
+            )}
+            {mode === 'out' && (
+              <div className="form-field">
+                <label>Call sign</label>
+                <input value={callSign} onChange={(e) => setCallSign(e.target.value)} />
+              </div>
+            )}
+            <div className="form-field">
+              <label>Seal number on the bag</label>
+              <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} placeholder="Number on the tamper seal" required />
+            </div>
+            {mode === 'in' && (
+              <>
+                <div className="form-field">
+                  <label>Is the seal intact?</label>
+                  <select value={sealIntact} onChange={(e) => setSealIntact(e.target.value)} required>
+                    <option value="" disabled>Select</option>
+                    <option value="YES">Yes — intact</option>
+                    <option value="NO">No — broken or missing</option>
+                  </select>
+                </div>
+                <div className="form-field">
+                  <label>Did you use anything from the bag?</label>
+                  <select value={drugsUsed} onChange={(e) => setDrugsUsed(e.target.value)} required>
+                    <option value="" disabled>Select</option>
+                    <option value="NO">No</option>
+                    <option value="YES">Yes</option>
+                  </select>
+                </div>
+                <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                  <label>{drugsUsed === 'YES' ? 'What was used, and the incident / patient record reference' : 'Notes (optional)'}</label>
+                  <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} required={drugsUsed === 'YES'} />
+                </div>
+              </>
+            )}
+            {mode === 'out' && (
+              <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400 }}>
+                  <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} required />
+                  I've checked the seal is intact and the number matches.
+                </label>
+              </div>
+            )}
+          </div>
+        )}
+
+        {setup && (
+          <button type="submit" className="btn btn-primary" disabled={busy || !bagId} style={{ marginTop: 12 }}>
+            {busy ? 'Saving…' : mode === 'out' ? 'Sign out bag' : 'Sign in bag'}
+          </button>
+        )}
+        <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+          Your name and what you record are kept with the bag's history. See the <a href="/privacy" target="_blank" rel="noopener">privacy notice</a>.
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function AdminRoute({ children }) {
   const { user } = useAuth();
   if (!isMgrOrAdmin(user?.role)) return <Navigate to="/incidents" replace />;
@@ -6913,6 +7135,7 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/report" element={<PublicReport />} />
       <Route path="/vdi" element={<PublicVdi />} />
+      <Route path="/drug-bag" element={<PublicDrugBag />} />
       <Route
         path="/*"
         element={

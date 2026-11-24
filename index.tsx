@@ -3777,6 +3777,160 @@ async function bagNumberTaken(bagNumber: string, exceptId: number | null) {
   return !!row;
 }
 
+// ---- Shared sign-out / sign-in rules (manager screens and the crew QR form) ----
+// actor.via is "QR form" for crew submissions (no Dynamo login), else null.
+type BagActor = { sub: number | null; name: string | null; via: string | null };
+
+async function signOutDrugBag(bag: any, body: any, actor: BagActor): Promise<{ error?: string; status?: number }> {
+  if (!bag.active) return { error: "This bag is archived." };
+  if (bag.mv_id) return { error: `Bag ${bag.bag_number} is already signed out. It must be signed back in first.` };
+  if (bag.status !== "AVAILABLE") {
+    return { error: `Bag ${bag.bag_number} is “${DRUG_BAG_STATUS_LABEL[bag.status]}” and can't be signed out until it's restocked and marked available.` };
+  }
+  if (dueStatus(bag.expiry_date) === "OVERDUE") {
+    return { error: `Bag ${bag.bag_number} contains expired items (earliest expiry ${fmtDocDate(bag.expiry_date)}). It must be restocked before it's signed out.` };
+  }
+  const to = cleanText(body.signedOutTo, 120);
+  const norm = (v: any) => String(v || "").replace(/\s/g, "").toUpperCase();
+  let seal = cleanText(body.sealNumber, 40);
+  if (!to) return { error: actor.via ? "Enter your name." : "Enter who the bag is signed out to." };
+  if (!seal) return { error: "Enter the seal number on the bag." };
+  // Same seal typed differently (case/spaces): keep the recorded format.
+  if (bag.seal_number && norm(bag.seal_number) === norm(seal)) seal = bag.seal_number;
+  // On the crew form the seal must match the one on record: a different seal
+  // means the bag may have been opened since it was sealed.
+  if (actor.via && bag.seal_number && norm(bag.seal_number) !== norm(seal)) {
+    return { error: `The seal number doesn't match the seal recorded for bag ${bag.bag_number}. Don't use this bag — tell a manager.`, status: 409 };
+  }
+  const vehicleId = body.vehicleId ? Number(body.vehicleId) : null;
+  let vehicleReg: string | null = null;
+  if (vehicleId) {
+    const [v] = await sql`SELECT reg FROM vehicles WHERE id = ${vehicleId}`;
+    if (!v) return { error: "Vehicle not found" };
+    vehicleReg = v.reg;
+  }
+  const second = cleanText(body.secondCrew, 120);
+  const callSign = cleanText(body.callSign, 40);
+  try {
+    await sql`
+      INSERT INTO drug_bag_movements (bag_id, signed_out_to, second_crew, vehicle_id, call_sign, seal_out, out_notes, issued_by)
+      VALUES (${bag.id}, ${to}, ${second}, ${vehicleId}, ${callSign}, ${seal}, ${cleanText(body.notes, 1000)}, ${actor.sub})
+    `;
+  } catch (err: any) {
+    if (String(err?.message || "").includes("duplicate key")) return { error: "This bag has just been signed out by someone else.", status: 409 };
+    throw err;
+  }
+  await sql`UPDATE drug_bags SET status = 'SIGNED_OUT', seal_number = ${seal}, updated_at = now() WHERE id = ${bag.id}`;
+  const sealNote = bag.seal_number && norm(bag.seal_number) !== norm(seal) ? ` (seal on record was ${bag.seal_number})` : "";
+  await logBagEvent(bag.id, actor, "SIGNED_OUT",
+    `Signed out to ${to}${second ? ` and ${second}` : ""}${vehicleReg ? `, vehicle ${vehicleReg}` : ""}${callSign ? `, call sign ${callSign}` : ""}, seal ${seal}${sealNote}` +
+      (actor.via ? ` (via ${actor.via})` : ` (recorded by ${actor.name})`));
+  return {};
+}
+
+async function returnDrugBag(bag: any, body: any, actor: BagActor): Promise<{ error?: string; status?: number; sealMismatch?: boolean; needsRestock?: boolean }> {
+  if (!bag.mv_id) return { error: "This bag isn't signed out." };
+  const by = cleanText(body.returnedBy, 120);
+  const seal = cleanText(body.sealNumber, 40);
+  if (!by) return { error: actor.via ? "Enter your name." : "Enter who returned the bag." };
+  if (!seal) return { error: "Enter the seal number on the bag as returned." };
+  if (typeof body.sealIntact !== "boolean") return { error: "Say whether the seal is intact." };
+  if (typeof body.drugsUsed !== "boolean") return { error: "Say whether any drugs or items were used." };
+  const sealMatches = !bag.mv_seal_out || bag.mv_seal_out.replace(/\s/g, "").toUpperCase() === seal.replace(/\s/g, "").toUpperCase();
+  const intact = body.sealIntact && sealMatches;
+  const needsRestock = !intact || body.drugsUsed;
+  const notes = cleanText(body.notes, 1000);
+  if (body.drugsUsed && !notes) return { error: "Record what was used (and the incident or patient record reference) in the notes." };
+  await sql`
+    UPDATE drug_bag_movements SET returned_at = now(), returned_by = ${by}, seal_in = ${seal},
+      seal_intact = ${intact}, drugs_used = ${body.drugsUsed}, return_notes = ${notes}, received_by = ${actor.sub}
+    WHERE id = ${bag.mv_id}
+  `;
+  const newStatus = needsRestock ? "RESTOCK" : "AVAILABLE";
+  await sql`UPDATE drug_bags SET status = ${newStatus}, seal_number = ${seal}, updated_at = now() WHERE id = ${bag.id}`;
+  const parts = [`Signed back in by ${by}`, `seal ${seal}`];
+  if (!sealMatches) parts.push(`SEAL NUMBER DOES NOT MATCH sign-out seal ${bag.mv_seal_out}`);
+  else if (!body.sealIntact) parts.push("seal broken");
+  if (body.drugsUsed) parts.push("drugs/items used");
+  parts.push(needsRestock ? "bag needs restock / check" : "bag available");
+  await logBagEvent(bag.id, actor, "RETURNED", `${parts.join(", ")}` + (actor.via ? ` (via ${actor.via})` : ` (received by ${actor.name})`));
+  // Tell managers when a bag comes back through the QR form needing attention.
+  if (actor.via && (needsRestock || !sealMatches)) {
+    const reasons = [!sealMatches ? `seal number ${seal} doesn't match the seal it went out with (${bag.mv_seal_out})` : null,
+      sealMatches && !body.sealIntact ? "seal broken" : null, body.drugsUsed ? "drugs/items used" : null].filter(Boolean);
+    getMgrAndAdminEmails().then((emails) => sendAlertEmail(
+      emails,
+      `${!sealMatches ? "SEAL MISMATCH: " : ""}Drug bag ${bag.bag_number} needs restock / check`,
+      `Drug bag ${bag.bag_number} was signed back in through the QR form by ${by}: ${reasons.join("; ")}.\n\nIt has been marked "Needs restock / check" and can't be signed out again until it's restocked. Open Drug Bag Sign In / Sign Out in Dynamo.`,
+      `<p>Drug bag <strong>${escapeHtml(bag.bag_number)}</strong> was signed back in through the QR form by ${escapeHtml(by)}: ${escapeHtml(reasons.join("; "))}.</p>` +
+        `<p>It has been marked “Needs restock / check” and can't be signed out again until it's restocked. Open Drug Bag Sign In / Sign Out in Dynamo.</p>`
+    )).catch((err) => console.log(`Drug bag alert failed: ${err}`));
+  }
+  return { sealMismatch: !sealMatches, needsRestock };
+}
+
+// ---- Crew QR form (no login): /drug-bag ----
+const PUBLIC_BAG_WINDOW_MS = 60 * 60 * 1000;
+const PUBLIC_BAG_MAX_PER_IP = 40;
+
+async function handlePublicDrugBagRequest(req: Request, path: string, method: string, ip: string): Promise<Response | null> {
+  if (!path.startsWith("/api/public/drug-bags")) return null;
+
+  if (path === "/api/public/drug-bags/setup" && method === "GET") {
+    // Bag numbers and status only — never who has a bag.
+    const bags = ((await listDrugBags(false)) as any[]).map(serializeDrugBag);
+    const vehicles = await sql`SELECT id, reg, call_sign FROM vehicles WHERE active = TRUE ORDER BY call_sign NULLS LAST, reg`;
+    return json({
+      bags: bags.map((b) => ({
+        id: b.id,
+        bagNumber: b.bagNumber,
+        bagType: b.bagType,
+        state: b.current ? "SIGNED_OUT" : b.status === "AVAILABLE" && b.expiryStatus !== "OVERDUE" ? "AVAILABLE" : "UNAVAILABLE",
+        unavailableReason: b.current ? null
+          : b.expiryStatus === "OVERDUE" ? "contains expired items"
+          : b.status !== "AVAILABLE" ? (DRUG_BAG_STATUS_LABEL[b.status] || b.status).toLowerCase() : null,
+      })),
+      vehicles: (vehicles as any[]).map((v) => ({ id: v.id, reg: v.reg, callSign: v.call_sign })),
+    });
+  }
+
+  if ((path === "/api/public/drug-bags/sign-out" || path === "/api/public/drug-bags/sign-in") && method === "POST") {
+    const key = `public-bag:${ip}`;
+    if (recentAttempts(key, PUBLIC_BAG_WINDOW_MS).length >= PUBLIC_BAG_MAX_PER_IP) {
+      return json({ error: "Too many submissions from this connection. Please try again later." }, 429);
+    }
+    recordAttempt(key);
+    const body = await req.json().catch(() => ({}));
+    const bag = body.bagId ? await getDrugBag(Number(body.bagId)) : null;
+    if (!bag || !bag.active) return json({ error: "Choose the drug bag." }, 400);
+    const actor: BagActor = { sub: null, name: null, via: "QR form" };
+    if (path.endsWith("/sign-out")) {
+      const r = await signOutDrugBag(bag, body, actor);
+      if (r.error) return json({ error: r.error }, r.status || 400);
+      return json({ ok: true, action: "SIGNED_OUT", bagNumber: bag.bag_number }, 201);
+    }
+    const r = await returnDrugBag(bag, body, actor);
+    if (r.error) return json({ error: r.error }, r.status || 400);
+    return json({ ok: true, action: "RETURNED", bagNumber: bag.bag_number, needsRestock: r.needsRestock, sealMismatch: r.sealMismatch }, 201);
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+// Print page for drug bag QR codes: the vehicle check print page with
+// drug-bag wording, reading from /api/medication/qr.
+const DRUG_BAG_QR_PAGE = FLEET_QR_PAGE
+  .replace("<title>Vehicle check QR codes</title>", "<title>Drug bag QR codes</title>")
+  .replace("<h1>Vehicle check QR codes</h1>", "<h1>Drug bag sign in / sign out QR codes</h1>")
+  .replace("Include general code (any vehicle)", "Include general code (any bag)")
+  .replace("Fleet Management → Print QR codes", "Drug Bag Sign In / Sign Out → Print QR codes")
+  .replace('fetch("/api/fleet/qr"', 'fetch("/api/medication/qr"')
+  .replace("Could not load vehicles", "Could not load drug bags")
+  .replace("Scan before every shift · no login", "Scan to sign out or sign in · no login")
+  .replace('tag("VEHICLE DAILY CHECK", v.reg, [v.callSign, v.vehicleType].filter(Boolean).join(" · "), v.svg, "")', 'tag("DRUG BAG", v.reg, v.vehicleType || "", v.svg, "")')
+  .replace('tag("VEHICLE DAILY CHECK", "Any vehicle", "Choose the vehicle on the form", d.generalSvg, " general")', 'tag("DRUG BAG SIGN OUT / IN", "Any bag", "Choose the bag on the form", d.generalSvg, " general")')
+  .replace("No vehicles yet — add them in Fleet Management to get a code for each one.", "No drug bags yet — add them in Drug Bag Sign In / Sign Out to get a code for each one.");
+
 async function handleMedicationRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
   if (!path.startsWith("/api/medication")) return null;
   const auth = await getAuth(req);
@@ -3813,6 +3967,22 @@ async function handleMedicationRequest(req: Request, url: URL, path: string, met
     await logBagEvent(row.id, auth, "ADDED",
       `Drug bag ${bagNumber} added${body.sealNumber ? `, seal ${cleanText(body.sealNumber, 40)}` : ""}${cleanDate(body.expiryDate) ? `, earliest expiry ${fmtDocDate(cleanDate(body.expiryDate))}` : ""} by ${auth.name}`);
     return json(serializeDrugBag(await getDrugBag(row.id)), 201);
+  }
+
+  if (path === "/api/medication/qr" && method === "GET") {
+    const origin = publicOrigin(req);
+    const qr = (text: string) => QRCode.toString(text, { type: "svg", errorCorrectionLevel: "M", margin: 1 });
+    const generalUrl = `${origin}/drug-bag`;
+    const bags = ((await listDrugBags(false)) as any[]).map(serializeDrugBag);
+    // Same shape as the vehicle QR endpoint so the print page can be shared.
+    return json({
+      generalUrl,
+      generalSvg: await qr(generalUrl),
+      vehicles: await Promise.all(bags.map(async (b) => {
+        const bUrl = `${origin}/drug-bag?bag=${encodeURIComponent(b.bagNumber.replace(/[^A-Za-z0-9]/g, ""))}`;
+        return { id: b.id, reg: b.bagNumber, vehicleType: b.bagType, url: bUrl, svg: await qr(bUrl) };
+      })),
+    });
   }
 
   if (path === "/api/medication/movements" && method === "GET") {
@@ -3870,71 +4040,16 @@ async function handleMedicationRequest(req: Request, url: URL, path: string, met
 
   if (action === "sign-out" && method === "POST") {
     const body = await req.json().catch(() => ({}));
-    if (!bag.active) return json({ error: "This bag is archived." }, 400);
-    if (bag.mv_id) return json({ error: `Bag ${bag.bag_number} is already signed out to ${bag.mv_to}. Sign it back in first.` }, 400);
-    if (bag.status !== "AVAILABLE") {
-      return json({ error: `Bag ${bag.bag_number} is “${DRUG_BAG_STATUS_LABEL[bag.status]}” and can't be signed out until it's restocked and marked available.` }, 400);
-    }
-    if (dueStatus(bag.expiry_date) === "OVERDUE") {
-      return json({ error: `Bag ${bag.bag_number} contains expired items (earliest expiry ${fmtDocDate(bag.expiry_date)}). Restock it before signing it out.` }, 400);
-    }
-    const to = cleanText(body.signedOutTo, 120);
-    const seal = cleanText(body.sealNumber, 40);
-    if (!to) return json({ error: "Enter who the bag is signed out to." }, 400);
-    if (!seal) return json({ error: "Enter the seal number on the bag." }, 400);
-    const vehicleId = body.vehicleId ? Number(body.vehicleId) : null;
-    let vehicleReg: string | null = null;
-    if (vehicleId) {
-      const [v] = await sql`SELECT reg FROM vehicles WHERE id = ${vehicleId}`;
-      if (!v) return json({ error: "Vehicle not found" }, 400);
-      vehicleReg = v.reg;
-    }
-    const second = cleanText(body.secondCrew, 120);
-    const callSign = cleanText(body.callSign, 40);
-    try {
-      await sql`
-        INSERT INTO drug_bag_movements (bag_id, signed_out_to, second_crew, vehicle_id, call_sign, seal_out, out_notes, issued_by)
-        VALUES (${id}, ${to}, ${second}, ${vehicleId}, ${callSign}, ${seal}, ${cleanText(body.notes, 1000)}, ${auth.sub})
-      `;
-    } catch (err: any) {
-      if (String(err?.message || "").includes("duplicate key")) return json({ error: "This bag has just been signed out by someone else." }, 409);
-      throw err;
-    }
-    await sql`UPDATE drug_bags SET status = 'SIGNED_OUT', seal_number = ${seal}, updated_at = now() WHERE id = ${id}`;
-    const sealNote = bag.seal_number && bag.seal_number !== seal ? ` (seal on record was ${bag.seal_number})` : "";
-    await logBagEvent(id, auth, "SIGNED_OUT",
-      `Signed out to ${to}${second ? ` and ${second}` : ""}${vehicleReg ? `, vehicle ${vehicleReg}` : ""}${callSign ? `, call sign ${callSign}` : ""}, seal ${seal}${sealNote} (recorded by ${auth.name})`);
+    const r = await signOutDrugBag(bag, body, { sub: auth.sub, name: auth.name, via: null });
+    if (r.error) return json({ error: r.error }, r.status || 400);
     return json(serializeDrugBag(await getDrugBag(id)));
   }
 
   if (action === "return" && method === "POST") {
     const body = await req.json().catch(() => ({}));
-    if (!bag.mv_id) return json({ error: "This bag isn't signed out." }, 400);
-    const by = cleanText(body.returnedBy, 120);
-    const seal = cleanText(body.sealNumber, 40);
-    if (!by) return json({ error: "Enter who returned the bag." }, 400);
-    if (!seal) return json({ error: "Enter the seal number on the bag as returned." }, 400);
-    if (typeof body.sealIntact !== "boolean") return json({ error: "Say whether the seal is intact." }, 400);
-    if (typeof body.drugsUsed !== "boolean") return json({ error: "Say whether any drugs or items were used." }, 400);
-    const sealMatches = !bag.mv_seal_out || bag.mv_seal_out.replace(/\s/g, "").toUpperCase() === seal.replace(/\s/g, "").toUpperCase();
-    const intact = body.sealIntact && sealMatches;
-    const needsRestock = !intact || body.drugsUsed;
-    const notes = cleanText(body.notes, 1000);
-    if (needsRestock && !notes && body.drugsUsed) return json({ error: "Record what was used (and the incident or patient reference if relevant) in the notes." }, 400);
-    await sql`
-      UPDATE drug_bag_movements SET returned_at = now(), returned_by = ${by}, seal_in = ${seal},
-        seal_intact = ${intact}, drugs_used = ${body.drugsUsed}, return_notes = ${notes}, received_by = ${auth.sub}
-      WHERE id = ${bag.mv_id}
-    `;
-    const newStatus = needsRestock ? "RESTOCK" : "AVAILABLE";
-    await sql`UPDATE drug_bags SET status = ${newStatus}, seal_number = ${seal}, updated_at = now() WHERE id = ${id}`;
-    const parts = [`Signed back in by ${by}`, `seal ${seal}`];
-    if (!sealMatches) parts.push(`SEAL NUMBER DOES NOT MATCH sign-out seal ${bag.mv_seal_out}`);
-    else if (!body.sealIntact) parts.push("seal broken");
-    if (body.drugsUsed) parts.push("drugs/items used");
-    parts.push(needsRestock ? "bag needs restock / check" : "bag available");
-    await logBagEvent(id, auth, "RETURNED", `${parts.join(", ")} (received by ${auth.name})`);
-    return json({ ...serializeDrugBag(await getDrugBag(id)), sealMismatch: !sealMatches });
+    const r = await returnDrugBag(bag, body, { sub: auth.sub, name: auth.name, via: null });
+    if (r.error) return json({ error: r.error }, r.status || 400);
+    return json({ ...serializeDrugBag(await getDrugBag(id)), sealMismatch: r.sealMismatch });
   }
 
   if (action === "restock" && method === "POST") {
@@ -4688,6 +4803,11 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (path === "/privacy" && method === "GET") {
       return new Response(await renderPrivacyPage(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
+    if (path === "/medication/qr" && method === "GET") {
+      return new Response(DRUG_BAG_QR_PAGE, {
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+      });
+    }
     if (path === "/fleet/qr" && method === "GET") {
       return new Response(FLEET_QR_PAGE, {
         headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
@@ -4700,6 +4820,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     }
     const gdprResponse = await handleGdprRequest(req, url, path, method);
     if (gdprResponse) return gdprResponse;
+    const publicBagResponse = await handlePublicDrugBagRequest(req, path, method, ip);
+    if (publicBagResponse) return publicBagResponse;
     const medStoreResponse = await handleMedStoreRequest(req, url, path, method);
     if (medStoreResponse) return medStoreResponse;
     const medicationResponse = await handleMedicationRequest(req, url, path, method);
