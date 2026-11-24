@@ -4863,6 +4863,74 @@ const DRUG_BAG_STATUS_BADGE = {
   OUT_OF_SERVICE: 'badge-grey',
 };
 const DRUG_BAG_TYPES = ['Paramedic drug bag', 'Technician drug bag', 'Controlled drugs pouch', 'Other'];
+const SEAL_COLOURS = { GREEN: { label: 'Green', bg: '#16a34a' }, YELLOW: { label: 'Yellow', bg: '#eab308' } };
+const DEPLOYMENTS = { FRONTLINE: 'Frontline', EVENTS: 'Events' };
+
+// Seal colour shown as a coloured dot + word (never colour alone). Older
+// records that used seal numbers show the number instead.
+function sealBadge(colour, legacyNumber) {
+  const c = SEAL_COLOURS[colour];
+  if (c) {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+        <span style={{ width: 12, height: 12, borderRadius: '50%', background: c.bg, border: '1px solid rgba(0,0,0,.2)' }} />
+        {c.label}
+      </span>
+    );
+  }
+  return legacyNumber ? <span className="muted">No. {legacyNumber}</span> : <span className="muted">—</span>;
+}
+
+function deploymentText(x) {
+  if (!x || !x.deployment) return null;
+  return x.deployment === 'EVENTS' ? `Event: ${x.eventName || '—'}` : 'Frontline';
+}
+
+// Two large buttons: green or yellow seal.
+function SealColourPicker({ value, onChange, label = 'Seal colour' }) {
+  return (
+    <div>
+      <label>{label} <span style={{ color: 'var(--red)' }}>*</span></label>
+      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+        {Object.entries(SEAL_COLOURS).map(([k, c]) => (
+          <button type="button" key={k} onClick={() => onChange(k)} aria-pressed={value === k}
+            style={{
+              flex: 1, padding: '10px 12px', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 15,
+              border: value === k ? `2px solid ${c.bg}` : '1px solid var(--border)',
+              background: value === k ? c.bg : '#fff', color: value === k ? (k === 'YELLOW' ? '#1f2937' : '#fff') : '#1f2937',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            }}>
+            <span style={{ width: 14, height: 14, borderRadius: '50%', background: c.bg, border: '2px solid #fff', boxShadow: '0 0 0 1px rgba(0,0,0,.2)' }} />
+            {c.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Events or Frontline; events also need the event name.
+function DeploymentPicker({ value, onChange, eventName, onEventName }) {
+  return (
+    <>
+      <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+        <label>Events or frontline? <span style={{ color: 'var(--red)' }}>*</span></label>
+        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          {Object.entries(DEPLOYMENTS).map(([k, l]) => (
+            <button type="button" key={k} className={'btn ' + (value === k ? 'btn-primary' : 'btn-ghost')} style={{ flex: 1 }}
+              onClick={() => onChange(k)} aria-pressed={value === k}>{l}</button>
+          ))}
+        </div>
+      </div>
+      {value === 'EVENTS' && (
+        <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+          <label>What event are you attending? <span style={{ color: 'var(--red)' }}>*</span></label>
+          <input value={eventName} onChange={(e) => onEventName(e.target.value)} placeholder="e.g. Luton Town v Watford, Kenilworth Road" required autoFocus />
+        </div>
+      )}
+    </>
+  );
+}
 const NEW_BAG = '__new__';
 
 function bagExpiryCell(b) {
@@ -5017,14 +5085,14 @@ function Medication() {
                         <div className="muted" style={{ fontSize: 12 }}>{b.bagType || '—'}{!b.active ? ' · archived' : ''}</div>
                       </td>
                       <td><span className={'badge ' + (DRUG_BAG_STATUS_BADGE[b.status] || 'badge-grey')}>{b.statusLabel}</span></td>
-                      <td>{b.sealNumber || <span className="muted">—</span>}</td>
+                      <td>{sealBadge(b.sealColour, b.sealNumber)}</td>
                       <td>{bagExpiryCell(b)}</td>
                       <td>
                         {b.current ? (
                           <>
                             <div>{b.current.signedOutTo}{b.current.secondCrew ? ` & ${b.current.secondCrew}` : ''}</div>
                             <div className="muted" style={{ fontSize: 12 }}>
-                              {[b.current.vehicleReg, b.current.callSign].filter(Boolean).join(' · ') || '—'} · out {hoursSince(b.current.signedOutAt)}
+                              {[deploymentText(b.current), b.current.vehicleReg, b.current.callSign].filter(Boolean).join(' · ') || '—'} · out {hoursSince(b.current.signedOutAt)}
                             </div>
                           </>
                         ) : <span className="muted">—</span>}
@@ -5054,18 +5122,19 @@ function Medication() {
           ) : (
             <table className="table">
               <thead>
-                <tr><th>Bag</th><th>Signed out to</th><th>Vehicle / call sign</th><th>Seal out</th><th>Signed out</th><th></th></tr>
+                <tr><th>Bag</th><th>Signed out to</th><th>For</th><th>Vehicle / call sign</th><th>Seal out</th><th>Signed out</th><th></th></tr>
               </thead>
               <tbody>
                 {out.map((b) => (
                   <tr key={b.id}>
                     <td><span className="ref-link">{b.bagNumber}</span></td>
                     <td>{b.current.signedOutTo}{b.current.secondCrew ? <div className="muted" style={{ fontSize: 12 }}>& {b.current.secondCrew}</div> : null}</td>
+                    <td>{deploymentText(b.current) || '—'}</td>
                     <td>{[b.current.vehicleReg, b.current.callSign].filter(Boolean).join(' · ') || '—'}</td>
-                    <td>{b.current.sealOut || '—'}</td>
+                    <td>{sealBadge(b.current.sealColourOut, b.current.sealOut)}</td>
                     <td>
                       {fmtDate(b.current.signedOutAt)} {fmtTime(b.current.signedOutAt)}
-                      <div className="muted" style={{ fontSize: 12 }}>{hoursSince(b.current.signedOutAt)} ago · by {b.current.issuedByName || '—'}</div>
+                      <div className="muted" style={{ fontSize: 12 }}>{hoursSince(b.current.signedOutAt)} ago · by {b.current.issuedByName || 'QR form'}</div>
                     </td>
                     <td style={{ textAlign: 'right' }}><button className="btn btn-primary btn-sm" onClick={() => setReturning(b)}>Sign in</button></td>
                   </tr>
@@ -5084,19 +5153,20 @@ function Medication() {
             <div style={{ overflowX: 'auto' }}>
               <table className="table">
                 <thead>
-                  <tr><th>Bag</th><th>Signed out</th><th>To</th><th>Vehicle</th><th>Seal out / in</th><th>Returned</th><th>Result</th></tr>
+                  <tr><th>Bag</th><th>Signed out</th><th>To</th><th>For</th><th>Vehicle</th><th>Seal out / in</th><th>Returned</th><th>Result</th></tr>
                 </thead>
                 <tbody>
                   {movements.map((mv) => (
                     <tr key={mv.id}>
                       <td><span className="ref-link">{mv.bagNumber}</span></td>
-                      <td>{fmtDate(mv.signedOutAt)} {fmtTime(mv.signedOutAt)}<div className="muted" style={{ fontSize: 12 }}>by {mv.issuedByName || '—'}</div></td>
+                      <td>{fmtDate(mv.signedOutAt)} {fmtTime(mv.signedOutAt)}<div className="muted" style={{ fontSize: 12 }}>by {mv.issuedByName || 'QR form'}</div></td>
                       <td>{mv.signedOutTo}{mv.secondCrew ? <div className="muted" style={{ fontSize: 12 }}>& {mv.secondCrew}</div> : null}</td>
+                      <td>{deploymentText(mv) || '—'}</td>
                       <td>{[mv.vehicleReg, mv.callSign].filter(Boolean).join(' · ') || '—'}</td>
-                      <td>{mv.sealOut || '—'} / {mv.sealIn || '—'}</td>
+                      <td style={{ whiteSpace: 'nowrap' }}>{sealBadge(mv.sealColourOut, mv.sealOut)} / {mv.returnedAt ? sealBadge(mv.sealColourIn, mv.sealIn) : '—'}</td>
                       <td>
                         {mv.returnedAt ? (
-                          <>{fmtDate(mv.returnedAt)} {fmtTime(mv.returnedAt)}<div className="muted" style={{ fontSize: 12 }}>by {mv.returnedBy} · received by {mv.receivedByName || '—'}</div></>
+                          <>{fmtDate(mv.returnedAt)} {fmtTime(mv.returnedAt)}<div className="muted" style={{ fontSize: 12 }}>by {mv.returnedBy} · received by {mv.receivedByName || 'QR form'}</div></>
                         ) : <span className="badge badge-blue">Still out</span>}
                       </td>
                       <td>
@@ -5161,7 +5231,9 @@ function SignOutBagModal({ bags, vehicles, initialBagId, onClose, onSaved }) {
   const [newBagType, setNewBagType] = useState(DRUG_BAG_TYPES[0]);
   const [newExpiry, setNewExpiry] = useState('');
   const selected = bags.find((b) => String(b.id) === bagId) || null;
-  const [sealNumber, setSealNumber] = useState(selected?.sealNumber || '');
+  const [sealColour, setSealColour] = useState(selected?.sealColour || '');
+  const [deployment, setDeployment] = useState('');
+  const [eventName, setEventName] = useState('');
   const [signedOutTo, setSignedOutTo] = useState('');
   const [secondCrew, setSecondCrew] = useState('');
   const [vehicleId, setVehicleId] = useState('');
@@ -5174,7 +5246,7 @@ function SignOutBagModal({ bags, vehicles, initialBagId, onClose, onSaved }) {
   function chooseBag(value) {
     setBagId(value);
     const b = bags.find((x) => String(x.id) === value);
-    setSealNumber(b?.sealNumber || '');
+    setSealColour(b?.sealColour || '');
   }
 
   function chooseVehicle(value) {
@@ -5190,10 +5262,12 @@ function SignOutBagModal({ bags, vehicles, initialBagId, onClose, onSaved }) {
     try {
       let id = bagId;
       if (bagId === NEW_BAG) {
-        const created = await api.createDrugBag({ bagNumber: newBagNumber, bagType: newBagType, sealNumber, expiryDate: newExpiry || null });
+        const created = await api.createDrugBag({ bagNumber: newBagNumber, bagType: newBagType, sealColour, expiryDate: newExpiry || null });
         id = created.id;
       }
-      const bag = await api.signOutDrugBag(id, { signedOutTo, secondCrew, vehicleId: vehicleId || null, callSign, sealNumber, notes });
+      if (!sealColour) throw new Error('Choose the seal colour (green or yellow).');
+      if (!deployment) throw new Error('Choose Events or Frontline.');
+      const bag = await api.signOutDrugBag(id, { signedOutTo, secondCrew, vehicleId: vehicleId || null, callSign, sealColour, deployment, eventName, notes });
       onSaved(bag);
     } catch (err) {
       setError(err.message || 'Failed to sign out bag');
@@ -5220,7 +5294,7 @@ function SignOutBagModal({ bags, vehicles, initialBagId, onClose, onSaved }) {
               {available.length === 0 && bagId !== NEW_BAG && <option value="" disabled>No bags available</option>}
               {available.map((b) => (
                 <option key={b.id} value={b.id}>
-                  {b.bagNumber}{b.bagType ? ` — ${b.bagType}` : ''}{b.sealNumber ? ` (seal ${b.sealNumber})` : ''}
+                  {b.bagNumber}{b.bagType ? ` — ${b.bagType}` : ''}{SEAL_COLOURS[b.sealColour] ? ` (${SEAL_COLOURS[b.sealColour].label.toLowerCase()} seal)` : ''}
                 </option>
               ))}
               {selected && blocked && (
@@ -5260,10 +5334,10 @@ function SignOutBagModal({ bags, vehicles, initialBagId, onClose, onSaved }) {
               </div>
             </>
           )}
-          <div className="form-field">
-            <label>Seal number <span style={{ color: 'var(--red)' }}>*</span></label>
-            <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} placeholder="Number on the tamper seal" required />
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <SealColourPicker value={sealColour} onChange={setSealColour} />
           </div>
+          <DeploymentPicker value={deployment} onChange={setDeployment} eventName={eventName} onEventName={setEventName} />
           <div className="form-field">
             <label>Signed out to (crew member) <span style={{ color: 'var(--red)' }}>*</span></label>
             <input value={signedOutTo} onChange={(e) => setSignedOutTo(e.target.value)} placeholder="Full name" required />
@@ -5290,7 +5364,7 @@ function SignOutBagModal({ bags, vehicles, initialBagId, onClose, onSaved }) {
           <div className="form-field" style={{ gridColumn: '1 / -1' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400 }}>
               <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} required />
-              I've checked the seal is intact and the seal number matches.
+              I've checked the seal is intact.
             </label>
           </div>
         </div>
@@ -5308,22 +5382,22 @@ function SignOutBagModal({ bags, vehicles, initialBagId, onClose, onSaved }) {
 
 function ReturnBagModal({ bag, onClose, onSaved }) {
   const [returnedBy, setReturnedBy] = useState(bag.current?.signedOutTo || '');
-  const [sealNumber, setSealNumber] = useState('');
+  const [sealColour, setSealColour] = useState('');
   const [sealIntact, setSealIntact] = useState('');
   const [drugsUsed, setDrugsUsed] = useState('');
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const mismatch = sealNumber.trim() && bag.current?.sealOut
-    && sealNumber.replace(/\s/g, '').toUpperCase() !== bag.current.sealOut.replace(/\s/g, '').toUpperCase();
+  const mismatch = !!sealColour && !!bag.current?.sealColourOut && sealColour !== bag.current.sealColourOut;
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
     setBusy(true);
     try {
+      if (!sealColour) throw new Error('Choose the seal colour on the bag now (green or yellow).');
       const saved = await api.returnDrugBag(bag.id, {
-        returnedBy, sealNumber, sealIntact: sealIntact === 'YES', drugsUsed: drugsUsed === 'YES', notes,
+        returnedBy, sealColour, sealIntact: sealIntact === 'YES', drugsUsed: drugsUsed === 'YES', notes,
       });
       onSaved(saved);
     } catch (err) {
@@ -5342,18 +5416,16 @@ function ReturnBagModal({ bag, onClose, onSaved }) {
         </div>
         {error && <div className="error-banner">{error}</div>}
         <div className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
-          Signed out to {bag.current?.signedOutTo}{bag.current?.secondCrew ? ` & ${bag.current.secondCrew}` : ''} on {fmtDate(bag.current?.signedOutAt)} {fmtTime(bag.current?.signedOutAt)}, seal <strong>{bag.current?.sealOut || '—'}</strong>.
+          Signed out to {bag.current?.signedOutTo}{bag.current?.secondCrew ? ` & ${bag.current.secondCrew}` : ''} on {fmtDate(bag.current?.signedOutAt)} {fmtTime(bag.current?.signedOutAt)}{deploymentText(bag.current) ? ` for ${deploymentText(bag.current).toLowerCase()}` : ''}, seal: <strong>{sealBadge(bag.current?.sealColourOut, bag.current?.sealOut)}</strong>.
         </div>
         <div className="form-grid">
           <div className="form-field">
             <label>Returned by <span style={{ color: 'var(--red)' }}>*</span></label>
             <input value={returnedBy} onChange={(e) => setReturnedBy(e.target.value)} required />
           </div>
-          <div className="form-field">
-            <label>Seal number now on the bag <span style={{ color: 'var(--red)' }}>*</span></label>
-            <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} required
-              style={mismatch ? { borderColor: 'var(--red)' } : undefined} />
-            {mismatch && <div style={{ fontSize: 13, marginTop: 4, color: 'var(--red)' }}>Doesn't match the seal it went out with ({bag.current.sealOut}).</div>}
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <SealColourPicker value={sealColour} onChange={setSealColour} label="Seal colour now on the bag" />
+            {mismatch && <div style={{ fontSize: 13, marginTop: 4, color: 'var(--red)' }}>Different from the seal it went out with ({SEAL_COLOURS[bag.current.sealColourOut].label.toLowerCase()}).</div>}
           </div>
           <div className="form-field">
             <label>Is the seal intact? <span style={{ color: 'var(--red)' }}>*</span></label>
@@ -5393,7 +5465,7 @@ function ReturnBagModal({ bag, onClose, onSaved }) {
 }
 
 function RestockBagModal({ bag, onClose, onSaved }) {
-  const [sealNumber, setSealNumber] = useState('');
+  const [sealColour, setSealColour] = useState('');
   const [expiryDate, setExpiryDate] = useState('');
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
@@ -5404,7 +5476,8 @@ function RestockBagModal({ bag, onClose, onSaved }) {
     setError('');
     setBusy(true);
     try {
-      onSaved(await api.restockDrugBag(bag.id, { sealNumber, expiryDate, notes }));
+      if (!sealColour) throw new Error('Choose the new seal colour (green or yellow).');
+      onSaved(await api.restockDrugBag(bag.id, { sealColour, expiryDate, notes }));
     } catch (err) {
       setError(err.message || 'Failed to restock bag');
     } finally {
@@ -5421,9 +5494,8 @@ function RestockBagModal({ bag, onClose, onSaved }) {
         </div>
         {error && <div className="error-banner">{error}</div>}
         <div className="form-grid">
-          <div className="form-field">
-            <label>New seal number <span style={{ color: 'var(--red)' }}>*</span></label>
-            <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} required autoFocus />
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <SealColourPicker value={sealColour} onChange={setSealColour} label="New seal colour" />
           </div>
           <div className="form-field">
             <label>Earliest expiry date in the bag <span style={{ color: 'var(--red)' }}>*</span></label>
@@ -5451,7 +5523,7 @@ function DrugBagModal({ bag, onClose, onSaved, onSignOut, onReturn, onRestock })
   const isNew = !bag;
   const [bagNumber, setBagNumber] = useState(bag?.bagNumber || '');
   const [bagType, setBagType] = useState(bag?.bagType || DRUG_BAG_TYPES[0]);
-  const [sealNumber, setSealNumber] = useState(bag?.sealNumber || '');
+  const [sealColour, setSealColour] = useState(bag?.sealColour || '');
   const [expiryDate, setExpiryDate] = useState(bag?.expiryDate || '');
   const [status, setStatus] = useState(bag?.status || 'AVAILABLE');
   const [notes, setNotes] = useState(bag?.notes || '');
@@ -5467,7 +5539,7 @@ function DrugBagModal({ bag, onClose, onSaved, onSignOut, onReturn, onRestock })
     setError('');
     setBusy(true);
     try {
-      const data = { bagNumber, bagType, sealNumber, expiryDate: expiryDate || null, notes, status, ...extra };
+      const data = { bagNumber, bagType, sealColour: sealColour || null, expiryDate: expiryDate || null, notes, status, ...extra };
       const saved = isNew ? await api.createDrugBag(data) : await api.updateDrugBag(bag.id, data);
       onSaved(saved, isNew);
     } catch (err) {
@@ -5508,8 +5580,11 @@ function DrugBagModal({ bag, onClose, onSaved, onSignOut, onReturn, onRestock })
             </select>
           </div>
           <div className="form-field">
-            <label>Current seal number</label>
-            <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} />
+            <label>Current seal colour</label>
+            <select value={sealColour} onChange={(e) => setSealColour(e.target.value)}>
+              <option value="">Not recorded</option>
+              {Object.entries(SEAL_COLOURS).map(([k, c]) => <option key={k} value={k}>{c.label}</option>)}
+            </select>
           </div>
           <div className="form-field">
             <label>Earliest expiry date in the bag</label>
@@ -6362,7 +6437,7 @@ function MedicationDashboard() {
                 <div>
                   <div style={{ fontWeight: 600 }}>{b.bagNumber}</div>
                   <div className="muted" style={{ fontSize: 12 }}>
-                    {b.kind === 'out' && <>With {b.to}{b.callSign ? ` (${b.callSign})` : ''} since {short(b.signedOutAt)} {fmtTime(b.signedOutAt)}</>}
+                    {b.kind === 'out' && <>With {b.to}{b.callSign ? ` (${b.callSign})` : ''}{deploymentText(b) ? ` · ${deploymentText(b)}` : ''} since {short(b.signedOutAt)} {fmtTime(b.signedOutAt)}</>}
                     {b.kind === 'restock' && 'Restock and reseal before next use'}
                     {b.kind === 'expiry' && <>Earliest expiry {short(b.expiryDate)}{b.signedOut ? ' · currently signed out' : ''}</>}
                   </div>
@@ -6916,7 +6991,9 @@ function PublicDrugBag() {
   const [secondCrew, setSecondCrew] = useState('');
   const [vehicleId, setVehicleId] = useState('');
   const [callSign, setCallSign] = useState('');
-  const [sealNumber, setSealNumber] = useState('');
+  const [sealColour, setSealColour] = useState('');
+  const [deployment, setDeployment] = useState('');
+  const [eventName, setEventName] = useState('');
   const [sealIntact, setSealIntact] = useState('');
   const [drugsUsed, setDrugsUsed] = useState('');
   const [notes, setNotes] = useState('');
@@ -6962,9 +7039,11 @@ function PublicDrugBag() {
     setError('');
     setBusy(true);
     try {
+      if (!sealColour) throw new Error('Choose the seal colour (green or yellow).');
+      if (mode === 'out' && !deployment) throw new Error('Choose Events or Frontline.');
       const res = mode === 'out'
-        ? await api.publicBagSignOut({ bagId: Number(bagId), signedOutTo: name, secondCrew, vehicleId: vehicleId || null, callSign, sealNumber })
-        : await api.publicBagSignIn({ bagId: Number(bagId), returnedBy: name, sealNumber, sealIntact: sealIntact === 'YES', drugsUsed: drugsUsed === 'YES', notes });
+        ? await api.publicBagSignOut({ bagId: Number(bagId), signedOutTo: name, secondCrew, vehicleId: vehicleId || null, callSign, sealColour, deployment, eventName })
+        : await api.publicBagSignIn({ bagId: Number(bagId), returnedBy: name, sealColour, sealIntact: sealIntact === 'YES', drugsUsed: drugsUsed === 'YES', notes });
       setDone(res);
     } catch (err) {
       setError(err.message || 'Something went wrong — please try again');
@@ -6974,7 +7053,7 @@ function PublicDrugBag() {
   }
 
   function reset() {
-    setBagId(''); setSealNumber(''); setSealIntact(''); setDrugsUsed(''); setNotes(''); setConfirmed(false);
+    setBagId(''); setSealColour(''); setDeployment(''); setEventName(''); setSealIntact(''); setDrugsUsed(''); setNotes(''); setConfirmed(false);
     setVehicleId(''); setCallSign(''); setSecondCrew(''); setDone(null); setError('');
     load(false);
   }
@@ -7004,7 +7083,7 @@ function PublicDrugBag() {
           {done.action === 'RETURNED' && done.needsRestock && (
             <div className="warning-banner" style={{ marginTop: 10 }}>
               Drug bag {done.bagNumber} is signed back in and marked for restock / check. Managers have been told.
-              {done.sealMismatch ? ' The seal number did not match the one it went out with.' : ''} Hand it to a manager or put it in the restock area.
+              {done.sealMismatch ? ' The seal colour is different from the one it went out with.' : ''} Hand it to a manager or put it in the restock area.
             </div>
           )}
           <button type="button" className="btn btn-primary" onClick={reset}>Done — another bag</button>
@@ -7064,9 +7143,11 @@ function PublicDrugBag() {
                 <input value={callSign} onChange={(e) => setCallSign(e.target.value)} />
               </div>
             )}
-            <div className="form-field">
-              <label>Seal number on the bag</label>
-              <input value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} placeholder="Number on the tamper seal" required />
+            {mode === 'out' && (
+              <DeploymentPicker value={deployment} onChange={setDeployment} eventName={eventName} onEventName={setEventName} />
+            )}
+            <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+              <SealColourPicker value={sealColour} onChange={setSealColour} label="Seal colour on the bag" />
             </div>
             {mode === 'in' && (
               <>
@@ -7096,7 +7177,7 @@ function PublicDrugBag() {
               <div className="form-field form-field-wide" style={{ gridColumn: '1 / -1' }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400 }}>
                   <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} required />
-                  I've checked the seal is intact and the number matches.
+                  I've checked the seal is intact.
                 </label>
               </div>
             )}

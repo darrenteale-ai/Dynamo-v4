@@ -765,6 +765,13 @@ async function ensureSchema() {
     )
   `;
   await sql`CREATE INDEX IF NOT EXISTS drug_bag_movements_bag ON drug_bag_movements (bag_id, signed_out_at DESC)`;
+  // Seal colour (green / yellow) replaced seal numbers; deployment is
+  // Events or Frontline, with the event name for events.
+  await sql`ALTER TABLE drug_bags ADD COLUMN IF NOT EXISTS seal_colour TEXT`;
+  await sql`ALTER TABLE drug_bag_movements ADD COLUMN IF NOT EXISTS seal_colour_out TEXT`;
+  await sql`ALTER TABLE drug_bag_movements ADD COLUMN IF NOT EXISTS seal_colour_in TEXT`;
+  await sql`ALTER TABLE drug_bag_movements ADD COLUMN IF NOT EXISTS deployment TEXT`;
+  await sql`ALTER TABLE drug_bag_movements ADD COLUMN IF NOT EXISTS event_name TEXT`;
   // A bag can only be signed out to one crew at a time.
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS drug_bag_movements_one_open ON drug_bag_movements (bag_id) WHERE returned_at IS NULL`;
   await sql`
@@ -2294,7 +2301,7 @@ async function renderPrivacyPage() {
 <li><strong>If you submit an incident report:</strong> your name, optionally your email address (so we can send you a reference), the vehicle registration, call sign, crew names, CAD reference, the date, time and place of the incident, your description, and any photos you attach. Near-miss reports can be made anonymously.</li>
 <li><strong>People mentioned in a report</strong> (for example patients, members of the public or colleagues): names and details that the reporter or investigating manager records. Reports about clinical care, safeguarding, medication or injuries may include <strong>information about a person's health</strong>, which is special category data.</li>
 <li><strong>If you complete a vehicle daily check:</strong> your name, the vehicle, its mileage, the check results and any defects you describe.</li>
-<li><strong>If a drug bag is signed out to you or returned by you:</strong> your name, the bag number, seal numbers, the vehicle and call sign, when it was signed out and returned, and whether any items were used.</li>
+<li><strong>If a drug bag is signed out to you or returned by you:</strong> your name, the bag number, the seal colour, whether it was for an event (and which event) or frontline work, the vehicle and call sign, when it was signed out and returned, and whether any items were used.</li>
 <li><strong>If company equipment is issued to you:</strong> your name, the item, when it was issued and returned, and its condition on return.</li>
 <li><strong>Managers and administrators who use Dynamo:</strong> name, work email, phone number, role, sign-in credentials (stored only as a secure hash), and a record of actions taken on each incident.</li>
 </ul>
@@ -2665,7 +2672,8 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
   const drugBagMovements = subject.name
     ? await sql`
         SELECT m.id, b.bag_number, m.signed_out_at, m.signed_out_to, m.second_crew, m.call_sign, m.seal_out,
-          m.returned_at, m.returned_by, m.seal_in, m.seal_intact, m.drugs_used, m.out_notes, m.return_notes
+          m.seal_colour_out, m.deployment, m.event_name,
+          m.returned_at, m.returned_by, m.seal_in, m.seal_colour_in, m.seal_intact, m.drugs_used, m.out_notes, m.return_notes
         FROM drug_bag_movements m JOIN drug_bags b ON b.id = m.bag_id
         WHERE m.signed_out_to ILIKE ${like} OR m.second_crew ILIKE ${like} OR m.returned_by ILIKE ${like}
         ORDER BY m.signed_out_at ASC
@@ -3669,6 +3677,13 @@ const DRUG_BAG_STATUS_LABEL: Record<string, string> = {
   OUT_OF_SERVICE: "Out of service",
 };
 
+const SEAL_COLOURS: Record<string, string> = { GREEN: "Green", YELLOW: "Yellow" };
+const DEPLOYMENTS: Record<string, string> = { FRONTLINE: "Frontline", EVENTS: "Events" };
+function cleanSealColour(v: any): string | null {
+  const s = String(v ?? "").toUpperCase().trim();
+  return SEAL_COLOURS[s] ? s : null;
+}
+
 function normaliseBagNumber(v: any): string | null {
   const s = String(v ?? "").toUpperCase().replace(/\s+/g, " ").trim().slice(0, 40);
   return s || null;
@@ -3689,6 +3704,7 @@ function serializeDrugBag(row: any) {
     status: row.status,
     statusLabel: DRUG_BAG_STATUS_LABEL[row.status] || row.status,
     sealNumber: row.seal_number,
+    sealColour: row.seal_colour,
     expiryDate: toDateStr(row.expiry_date),
     expiryStatus: dueStatus(row.expiry_date), // OVERDUE (expired) | DUE_SOON (30 days) | OK | null
     notes: row.notes,
@@ -3703,6 +3719,9 @@ function serializeDrugBag(row: any) {
           vehicleReg: row.mv_reg,
           callSign: row.mv_call_sign,
           sealOut: row.mv_seal_out,
+          sealColourOut: row.mv_seal_colour_out,
+          deployment: row.mv_deployment,
+          eventName: row.mv_event_name,
           issuedByName: row.mv_issued_by_name,
         }
       : null,
@@ -3721,6 +3740,10 @@ function serializeBagMovement(row: any) {
     vehicleReg: row.vehicle_reg,
     callSign: row.call_sign,
     sealOut: row.seal_out,
+    sealColourOut: row.seal_colour_out,
+    sealColourIn: row.seal_colour_in,
+    deployment: row.deployment,
+    eventName: row.event_name,
     outNotes: row.out_notes,
     issuedByName: row.issued_by_name,
     returnedAt: row.returned_at,
@@ -3736,7 +3759,8 @@ function serializeBagMovement(row: any) {
 async function listDrugBags(includeArchived: boolean, id: number | null = null) {
   return await sql`
     SELECT b.*, m.id AS mv_id, m.signed_out_at AS mv_out_at, m.signed_out_to AS mv_to, m.second_crew AS mv_second,
-      v.reg AS mv_reg, m.call_sign AS mv_call_sign, m.seal_out AS mv_seal_out, u.name AS mv_issued_by_name
+      v.reg AS mv_reg, m.call_sign AS mv_call_sign, m.seal_out AS mv_seal_out, u.name AS mv_issued_by_name,
+      m.seal_colour_out AS mv_seal_colour_out, m.deployment AS mv_deployment, m.event_name AS mv_event_name
     FROM drug_bags b
     LEFT JOIN drug_bag_movements m ON m.bag_id = b.id AND m.returned_at IS NULL
     LEFT JOIN vehicles v ON v.id = m.vehicle_id
@@ -3791,17 +3815,13 @@ async function signOutDrugBag(bag: any, body: any, actor: BagActor): Promise<{ e
     return { error: `Bag ${bag.bag_number} contains expired items (earliest expiry ${fmtDocDate(bag.expiry_date)}). It must be restocked before it's signed out.` };
   }
   const to = cleanText(body.signedOutTo, 120);
-  const norm = (v: any) => String(v || "").replace(/\s/g, "").toUpperCase();
-  let seal = cleanText(body.sealNumber, 40);
+  const colour = cleanSealColour(body.sealColour);
+  const deployment = DEPLOYMENTS[String(body.deployment || "").toUpperCase()] ? String(body.deployment).toUpperCase() : null;
+  const eventName = deployment === "EVENTS" ? cleanText(body.eventName, 160) : null;
   if (!to) return { error: actor.via ? "Enter your name." : "Enter who the bag is signed out to." };
-  if (!seal) return { error: "Enter the seal number on the bag." };
-  // Same seal typed differently (case/spaces): keep the recorded format.
-  if (bag.seal_number && norm(bag.seal_number) === norm(seal)) seal = bag.seal_number;
-  // On the crew form the seal must match the one on record: a different seal
-  // means the bag may have been opened since it was sealed.
-  if (actor.via && bag.seal_number && norm(bag.seal_number) !== norm(seal)) {
-    return { error: `The seal number doesn't match the seal recorded for bag ${bag.bag_number}. Don't use this bag — tell a manager.`, status: 409 };
-  }
+  if (!colour) return { error: "Choose the seal colour on the bag (green or yellow)." };
+  if (!deployment) return { error: "Choose Events or Frontline." };
+  if (deployment === "EVENTS" && !eventName) return { error: "Enter the event you're attending." };
   const vehicleId = body.vehicleId ? Number(body.vehicleId) : null;
   let vehicleReg: string | null = null;
   if (vehicleId) {
@@ -3813,17 +3833,18 @@ async function signOutDrugBag(bag: any, body: any, actor: BagActor): Promise<{ e
   const callSign = cleanText(body.callSign, 40);
   try {
     await sql`
-      INSERT INTO drug_bag_movements (bag_id, signed_out_to, second_crew, vehicle_id, call_sign, seal_out, out_notes, issued_by)
-      VALUES (${bag.id}, ${to}, ${second}, ${vehicleId}, ${callSign}, ${seal}, ${cleanText(body.notes, 1000)}, ${actor.sub})
+      INSERT INTO drug_bag_movements (bag_id, signed_out_to, second_crew, vehicle_id, call_sign, seal_colour_out, deployment, event_name, out_notes, issued_by)
+      VALUES (${bag.id}, ${to}, ${second}, ${vehicleId}, ${callSign}, ${colour}, ${deployment}, ${eventName}, ${cleanText(body.notes, 1000)}, ${actor.sub})
     `;
   } catch (err: any) {
     if (String(err?.message || "").includes("duplicate key")) return { error: "This bag has just been signed out by someone else.", status: 409 };
     throw err;
   }
-  await sql`UPDATE drug_bags SET status = 'SIGNED_OUT', seal_number = ${seal}, updated_at = now() WHERE id = ${bag.id}`;
-  const sealNote = bag.seal_number && norm(bag.seal_number) !== norm(seal) ? ` (seal on record was ${bag.seal_number})` : "";
+  await sql`UPDATE drug_bags SET status = 'SIGNED_OUT', seal_colour = ${colour}, updated_at = now() WHERE id = ${bag.id}`;
+  const colourNote = bag.seal_colour && bag.seal_colour !== colour ? ` (seal colour on record was ${SEAL_COLOURS[bag.seal_colour].toLowerCase()})` : "";
   await logBagEvent(bag.id, actor, "SIGNED_OUT",
-    `Signed out to ${to}${second ? ` and ${second}` : ""}${vehicleReg ? `, vehicle ${vehicleReg}` : ""}${callSign ? `, call sign ${callSign}` : ""}, seal ${seal}${sealNote}` +
+    `Signed out to ${to}${second ? ` and ${second}` : ""} for ${deployment === "EVENTS" ? `event: ${eventName}` : "frontline"}` +
+      `${vehicleReg ? `, vehicle ${vehicleReg}` : ""}${callSign ? `, call sign ${callSign}` : ""}, ${SEAL_COLOURS[colour].toLowerCase()} seal${colourNote}` +
       (actor.via ? ` (via ${actor.via})` : ` (recorded by ${actor.name})`));
   return {};
 }
@@ -3831,36 +3852,39 @@ async function signOutDrugBag(bag: any, body: any, actor: BagActor): Promise<{ e
 async function returnDrugBag(bag: any, body: any, actor: BagActor): Promise<{ error?: string; status?: number; sealMismatch?: boolean; needsRestock?: boolean }> {
   if (!bag.mv_id) return { error: "This bag isn't signed out." };
   const by = cleanText(body.returnedBy, 120);
-  const seal = cleanText(body.sealNumber, 40);
+  const colour = cleanSealColour(body.sealColour);
   if (!by) return { error: actor.via ? "Enter your name." : "Enter who returned the bag." };
-  if (!seal) return { error: "Enter the seal number on the bag as returned." };
+  if (!colour) return { error: "Choose the seal colour on the bag now (green or yellow)." };
   if (typeof body.sealIntact !== "boolean") return { error: "Say whether the seal is intact." };
   if (typeof body.drugsUsed !== "boolean") return { error: "Say whether any drugs or items were used." };
-  const sealMatches = !bag.mv_seal_out || bag.mv_seal_out.replace(/\s/g, "").toUpperCase() === seal.replace(/\s/g, "").toUpperCase();
+  // A different seal colour from the one it went out with means the bag was
+  // opened and resealed.
+  const sealMatches = !bag.mv_seal_colour_out || bag.mv_seal_colour_out === colour;
   const intact = body.sealIntact && sealMatches;
   const needsRestock = !intact || body.drugsUsed;
   const notes = cleanText(body.notes, 1000);
   if (body.drugsUsed && !notes) return { error: "Record what was used (and the incident or patient record reference) in the notes." };
   await sql`
-    UPDATE drug_bag_movements SET returned_at = now(), returned_by = ${by}, seal_in = ${seal},
+    UPDATE drug_bag_movements SET returned_at = now(), returned_by = ${by}, seal_colour_in = ${colour},
       seal_intact = ${intact}, drugs_used = ${body.drugsUsed}, return_notes = ${notes}, received_by = ${actor.sub}
     WHERE id = ${bag.mv_id}
   `;
   const newStatus = needsRestock ? "RESTOCK" : "AVAILABLE";
-  await sql`UPDATE drug_bags SET status = ${newStatus}, seal_number = ${seal}, updated_at = now() WHERE id = ${bag.id}`;
-  const parts = [`Signed back in by ${by}`, `seal ${seal}`];
-  if (!sealMatches) parts.push(`SEAL NUMBER DOES NOT MATCH sign-out seal ${bag.mv_seal_out}`);
+  await sql`UPDATE drug_bags SET status = ${newStatus}, seal_colour = ${colour}, updated_at = now() WHERE id = ${bag.id}`;
+  const outColour = SEAL_COLOURS[bag.mv_seal_colour_out]?.toLowerCase();
+  const parts = [`Signed back in by ${by}`, `${SEAL_COLOURS[colour].toLowerCase()} seal`];
+  if (!sealMatches) parts.push(`SEAL COLOUR CHANGED — went out with a ${outColour} seal`);
   else if (!body.sealIntact) parts.push("seal broken");
   if (body.drugsUsed) parts.push("drugs/items used");
   parts.push(needsRestock ? "bag needs restock / check" : "bag available");
   await logBagEvent(bag.id, actor, "RETURNED", `${parts.join(", ")}` + (actor.via ? ` (via ${actor.via})` : ` (received by ${actor.name})`));
   // Tell managers when a bag comes back through the QR form needing attention.
   if (actor.via && (needsRestock || !sealMatches)) {
-    const reasons = [!sealMatches ? `seal number ${seal} doesn't match the seal it went out with (${bag.mv_seal_out})` : null,
+    const reasons = [!sealMatches ? `came back with a ${SEAL_COLOURS[colour].toLowerCase()} seal but went out with a ${outColour} seal` : null,
       sealMatches && !body.sealIntact ? "seal broken" : null, body.drugsUsed ? "drugs/items used" : null].filter(Boolean);
     getMgrAndAdminEmails().then((emails) => sendAlertEmail(
       emails,
-      `${!sealMatches ? "SEAL MISMATCH: " : ""}Drug bag ${bag.bag_number} needs restock / check`,
+      `${!sealMatches ? "SEAL CHANGED: " : ""}Drug bag ${bag.bag_number} needs restock / check`,
       `Drug bag ${bag.bag_number} was signed back in through the QR form by ${by}: ${reasons.join("; ")}.\n\nIt has been marked "Needs restock / check" and can't be signed out again until it's restocked. Open Drug Bag Sign In / Sign Out in Dynamo.`,
       `<p>Drug bag <strong>${escapeHtml(bag.bag_number)}</strong> was signed back in through the QR form by ${escapeHtml(by)}: ${escapeHtml(reasons.join("; "))}.</p>` +
         `<p>It has been marked “Needs restock / check” and can't be signed out again until it's restocked. Open Drug Bag Sign In / Sign Out in Dynamo.</p>`
@@ -3960,12 +3984,12 @@ async function handleMedicationRequest(req: Request, url: URL, path: string, met
     if (!bagNumber) return json({ error: "Enter the drug bag number." }, 400);
     if (await bagNumberTaken(bagNumber, null)) return json({ error: `Drug bag ${bagNumber} already exists.` }, 400);
     const [row] = await sql`
-      INSERT INTO drug_bags (bag_number, bag_type, seal_number, expiry_date, notes)
-      VALUES (${bagNumber}, ${cleanText(body.bagType, 80)}, ${cleanText(body.sealNumber, 40)}, ${cleanDate(body.expiryDate)}, ${cleanText(body.notes, 1000)})
+      INSERT INTO drug_bags (bag_number, bag_type, seal_number, seal_colour, expiry_date, notes)
+      VALUES (${bagNumber}, ${cleanText(body.bagType, 80)}, ${cleanText(body.sealNumber, 40)}, ${cleanSealColour(body.sealColour)}, ${cleanDate(body.expiryDate)}, ${cleanText(body.notes, 1000)})
       RETURNING id
     `;
     await logBagEvent(row.id, auth, "ADDED",
-      `Drug bag ${bagNumber} added${body.sealNumber ? `, seal ${cleanText(body.sealNumber, 40)}` : ""}${cleanDate(body.expiryDate) ? `, earliest expiry ${fmtDocDate(cleanDate(body.expiryDate))}` : ""} by ${auth.name}`);
+      `Drug bag ${bagNumber} added${cleanSealColour(body.sealColour) ? `, ${SEAL_COLOURS[cleanSealColour(body.sealColour)!].toLowerCase()} seal` : ""}${cleanDate(body.expiryDate) ? `, earliest expiry ${fmtDocDate(cleanDate(body.expiryDate))}` : ""} by ${auth.name}`);
     return json(serializeDrugBag(await getDrugBag(row.id)), 201);
   }
 
@@ -4008,19 +4032,21 @@ async function handleMedicationRequest(req: Request, url: URL, path: string, met
     else if (["AVAILABLE", "RESTOCK", "OUT_OF_SERVICE"].includes(body.status)) status = body.status;
     const next = {
       bag_type: cleanText(body.bagType, 80),
-      seal_number: cleanText(body.sealNumber, 40),
+      seal_number: body.sealNumber === undefined ? bag.seal_number : cleanText(body.sealNumber, 40),
+      seal_colour: body.sealColour === undefined ? bag.seal_colour : cleanSealColour(body.sealColour),
       expiry_date: cleanDate(body.expiryDate),
       notes: cleanText(body.notes, 1000),
     };
     await sql`
       UPDATE drug_bags SET bag_number = ${bagNumber}, bag_type = ${next.bag_type}, status = ${status},
-        seal_number = ${next.seal_number}, expiry_date = ${next.expiry_date}, notes = ${next.notes},
+        seal_number = ${next.seal_number}, seal_colour = ${next.seal_colour}, expiry_date = ${next.expiry_date}, notes = ${next.notes},
         active = ${active}, updated_at = now()
       WHERE id = ${id}
     `;
     const changes: string[] = [];
     if (bagNumber !== bag.bag_number) changes.push(`number ${bag.bag_number} → ${bagNumber}`);
     if ((bag.seal_number || null) !== next.seal_number) changes.push(`seal ${bag.seal_number || "none"} → ${next.seal_number || "none"}`);
+    if ((bag.seal_colour || null) !== next.seal_colour) changes.push(`seal colour ${SEAL_COLOURS[bag.seal_colour] || "none"} → ${SEAL_COLOURS[next.seal_colour!] || "none"}`);
     if (toDateStr(bag.expiry_date) !== next.expiry_date) changes.push(`earliest expiry ${bag.expiry_date ? fmtDocDate(bag.expiry_date) : "none"} → ${next.expiry_date ? fmtDocDate(next.expiry_date) : "none"}`);
     if (bag.status !== status) changes.push(`status ${DRUG_BAG_STATUS_LABEL[bag.status]} → ${DRUG_BAG_STATUS_LABEL[status]}`);
     if ((bag.bag_type || null) !== next.bag_type) changes.push(`type → ${next.bag_type || "none"}`);
@@ -4055,18 +4081,18 @@ async function handleMedicationRequest(req: Request, url: URL, path: string, met
   if (action === "restock" && method === "POST") {
     const body = await req.json().catch(() => ({}));
     if (bag.mv_id) return json({ error: "Sign this bag back in before restocking it." }, 400);
-    const seal = cleanText(body.sealNumber, 40);
+    const colour = cleanSealColour(body.sealColour);
     const expiry = cleanDate(body.expiryDate);
-    if (!seal) return json({ error: "Enter the new seal number." }, 400);
+    if (!colour) return json({ error: "Choose the seal colour (green or yellow)." }, 400);
     if (!expiry) return json({ error: "Enter the earliest expiry date of the items in the bag." }, 400);
     if (dueStatus(expiry) === "OVERDUE") return json({ error: "The earliest expiry date is in the past. Replace the expired items first." }, 400);
     await sql`
-      UPDATE drug_bags SET status = 'AVAILABLE', seal_number = ${seal}, expiry_date = ${expiry}, updated_at = now()
+      UPDATE drug_bags SET status = 'AVAILABLE', seal_colour = ${colour}, seal_number = NULL, expiry_date = ${expiry}, updated_at = now()
       WHERE id = ${id}
     `;
     const notes = cleanText(body.notes, 1000);
     await logBagEvent(id, auth, "RESTOCKED",
-      `Restocked and resealed: seal ${seal}, earliest expiry ${fmtDocDate(expiry)}${notes ? ` — ${notes}` : ""} (by ${auth.name})`);
+      `Restocked and resealed: ${SEAL_COLOURS[colour].toLowerCase()} seal, earliest expiry ${fmtDocDate(expiry)}${notes ? ` — ${notes}` : ""} (by ${auth.name})`);
     return json(serializeDrugBag(await getDrugBag(id)));
   }
 
@@ -4221,7 +4247,8 @@ async function handleMedStoreRequest(req: Request, url: URL, path: string, metho
     const now = Date.now();
     const bagsOutLong = bags
       .filter((b) => b.current && now - new Date(b.current.signedOutAt).getTime() > OUT_TOO_LONG_HOURS * 3600000)
-      .map((b) => ({ id: b.id, bagNumber: b.bagNumber, to: b.current.signedOutTo, vehicleReg: b.current.vehicleReg, callSign: b.current.callSign, signedOutAt: b.current.signedOutAt }));
+      .map((b) => ({ id: b.id, bagNumber: b.bagNumber, to: b.current.signedOutTo, vehicleReg: b.current.vehicleReg, callSign: b.current.callSign,
+        signedOutAt: b.current.signedOutAt, deployment: b.current.deployment, eventName: b.current.eventName }));
     const bagsRestock = bags.filter((b) => !b.current && b.status === "RESTOCK").map((b) => ({ id: b.id, bagNumber: b.bagNumber }));
     const bagsExpiry = bags
       .filter((b) => b.expiryStatus === "OVERDUE" || b.expiryStatus === "DUE_SOON")
