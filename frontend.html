@@ -560,6 +560,8 @@ const api = {
   createStaff: (data) => request('/staff', { method: 'POST', body: data }),
   updateStaff: (id, data) => request(`/staff/${id}`, { method: 'PUT', body: data }),
   deleteStaff: (id) => request(`/staff/${id}`, { method: 'DELETE' }),
+  listRemovedStaff: () => request('/staff', { params: { removed: 1 } }),
+  restoreStaff: (id) => request(`/staff/${id}/restore`, { method: 'POST' }),
   resetStaffPasswords: (userIds) => request('/staff/reset-password', { method: 'POST', body: { userIds } }),
   getStaffProfile: (id) => request(`/staff/${id}`),
   listIncidents: () => request('/incidents'),
@@ -827,7 +829,10 @@ function Layout({ children }) {
     : location.pathname.startsWith('/datix') ? 'Datix'
     : location.pathname.startsWith('/medication-store') ? 'Medication Store'
     : location.pathname.startsWith('/medication-dashboard') ? 'Medication Dashboard'
-    : location.pathname.startsWith('/medication') ? 'Medication' : 'Incident Reporting';
+    : location.pathname.startsWith('/medication') ? 'Medication'
+    : location.pathname.startsWith('/staff') ? 'Staff'
+    : location.pathname.startsWith('/case-notes') ? 'Case Notes'
+    : location.pathname.startsWith('/settings') ? 'Settings' : 'Incident Reporting';
 
   return (
     <div className="app-shell">
@@ -3477,12 +3482,25 @@ function DatixHistoryModal({ doc, onClose }) {
 function Staff() {
   const { user: me } = useAuth();
   const [staff, setStaff] = useState([]);
+  const [removed, setRemoved] = useState([]);
+  const [tab, setTab] = useState('current');
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null); // staff object, 'new', or null
 
   function load() {
     setLoading(true);
+    api.listRemovedStaff().then(setRemoved).catch(() => {});
     return api.listStaff().then(setStaff).finally(() => setLoading(false));
+  }
+
+  async function handleRestore(s) {
+    if (!confirm(`Restore ${s.name}? Their account becomes active again and they can sign in with their existing password and two-factor sign-in.`)) return;
+    try {
+      await api.restoreStaff(s.id);
+      load();
+    } catch (err) {
+      alert(err.message || 'Failed to restore staff member');
+    }
   }
 
   useEffect(() => {
@@ -3491,7 +3509,7 @@ function Staff() {
 
   async function handleDelete(e, s) {
     e.stopPropagation();
-    if (!confirm(`Remove ${s.name}? They will no longer be able to log in.`)) return;
+    if (!confirm(`Remove ${s.name}? They'll be signed out straight away and won't be able to sign in. They'll move to the Removed tab, where they can be restored.`)) return;
     try {
       await api.deleteStaff(s.id);
       load();
@@ -3518,6 +3536,54 @@ function Staff() {
         <button className="btn btn-primary" onClick={() => setEditing('new')}>+ Add staff</button>
       </div>
 
+      <div className="tabs">
+        <button className={'tab-btn' + (tab === 'current' ? ' active' : '')} onClick={() => setTab('current')}>
+          Current staff ({staff.length})
+        </button>
+        <button className={'tab-btn' + (tab === 'removed' ? ' active' : '')} onClick={() => setTab('removed')}>
+          Removed staff ({removed.length})
+        </button>
+      </div>
+
+      {tab === 'removed' ? (
+        <div className="card table-card">
+          {removed.length === 0 ? (
+            <div className="empty">No removed staff members.</div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Removed</th>
+                  <th>Removed by</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {removed.map((s) => (
+                  <tr key={s.id}>
+                    <td>{s.name}</td>
+                    <td>{s.anonymisedAt ? '—' : s.email}</td>
+                    <td>{s.role}</td>
+                    <td>{new Date(s.removedAt || s.anonymisedAt).toLocaleDateString('en-GB')}</td>
+                    <td>{s.anonymisedAt ? <span className="badge badge-grey">Anonymised</span> : (s.removedByName || '—')}</td>
+                    <td className="actions-cell">
+                      {!s.anonymisedAt && (s.role !== 'ADMIN' || me?.role === 'ADMIN') && (
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleRestore(s)}>Restore</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="muted" style={{ fontSize: 12, padding: '10px 16px' }}>
+            Removed staff can't sign in. Their name stays on the records they worked on. They're anonymised automatically after the leaver retention period set on the data protection page (/gdpr), and anonymised accounts can't be restored.
+          </div>
+        </div>
+      ) : (
       <div className="card table-card">
         {loading ? (
           <div className="empty">Loading…</div>
@@ -3579,6 +3645,8 @@ function Staff() {
           </table>
         )}
       </div>
+
+      )}
 
       {editing && (
         <StaffModal

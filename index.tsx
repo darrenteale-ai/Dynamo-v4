@@ -528,6 +528,10 @@ async function ensureSchema() {
   // Datix documents. datix_role is shown on the Staff page (e.g. Director).
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS datix_access BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS datix_role TEXT`;
+  // "Remove" on the Staff page keeps the account (so records still show who
+  // did what) but signs the person out and lists them under Removed.
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS removed_by INTEGER REFERENCES users(id) ON DELETE SET NULL`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ`;
   // Accounts that were already inactive before this column existed start
   // their retention clock now.
@@ -5815,7 +5819,24 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (path === "/api/staff" && method === "GET") {
       const auth = await getAuth(req);
       if (!auth) return json({ error: "Unauthorized" }, 401);
-      const rows = await sql`SELECT id, name, email, phone, role, active, totp_enabled_at, datix_access, datix_role FROM users ORDER BY name`;
+      // Current staff by default; ?removed=1 lists removed and anonymised accounts.
+      if (url.searchParams.get("removed") === "1") {
+        if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+        const rows = await sql`
+          SELECT u.id, u.name, u.email, u.phone, u.role, u.active, u.removed_at, u.anonymised_at, u.deactivated_at, r.name AS removed_by_name
+          FROM users u LEFT JOIN users r ON r.id = u.removed_by
+          WHERE u.removed_at IS NOT NULL OR u.anonymised_at IS NOT NULL
+          ORDER BY COALESCE(u.removed_at, u.anonymised_at) DESC
+        `;
+        return json((rows as any[]).map((r) => ({
+          ...serializeStaff(r),
+          removedAt: r.removed_at, removedByName: r.removed_by_name ?? null, anonymisedAt: r.anonymised_at,
+        })));
+      }
+      const rows = await sql`
+        SELECT id, name, email, phone, role, active, totp_enabled_at, datix_access, datix_role FROM users
+        WHERE removed_at IS NULL AND anonymised_at IS NULL ORDER BY name
+      `;
       return json(rows.map(serializeStaff));
     }
 
@@ -5851,6 +5872,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         return json({ ...row, tempPassword }, 201);
       } catch (err: any) {
         if (String(err?.message || "").includes("duplicate key")) {
+          const [old] = await sql`SELECT removed_at FROM users WHERE lower(email) = lower(${body.email})`;
+          if (old?.removed_at) return json({ error: "That email belongs to a removed staff member. Restore them from the Removed tab instead." }, 400);
           return json({ error: "That email is already in use" }, 400);
         }
         throw err;
@@ -5920,8 +5943,9 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
       const id = Number(staffIdMatch[1]);
       const body = await req.json();
-      const [target] = await sql`SELECT id, email, role, active FROM users WHERE id = ${id}`;
+      const [target] = await sql`SELECT id, email, role, active, removed_at FROM users WHERE id = ${id}`;
       if (!target) return json({ error: "Not found" }, 404);
+      if (target.removed_at) return json({ error: "This person has been removed. Restore them from the Removed tab first." }, 400);
       const newRole = body.role === "ADMIN" ? "ADMIN" : "MANAGER";
       const newActive = body.active !== undefined ? body.active : true;
       if (!isAdmin(auth)) {
@@ -6000,13 +6024,41 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       if (!auth) return json({ error: "Unauthorized" }, 401);
       if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
       const id = Number(staffIdMatch[1]);
-      if (id === auth.sub) return json({ error: "You cannot delete your own account" }, 400);
-      const [target] = await sql`SELECT id, role FROM users WHERE id = ${id}`;
+      if (id === auth.sub) return json({ error: "You can't remove your own account." }, 400);
+      const [target] = await sql`SELECT id, role, active, datix_access, removed_at FROM users WHERE id = ${id}`;
       if (!target) return new Response(null, { status: 204 });
-      if (target.role === "ADMIN" && !isAdmin(auth)) return json({ error: "Only an admin can delete an admin account." }, 403);
-      await sql`DELETE FROM users WHERE id = ${id}`;
-      await logGdpr(auth, "STAFF_DELETED", `Staff account #${id} deleted`);
+      if (target.role === "ADMIN" && !isAdmin(auth)) return json({ error: "Only an admin can remove an admin account." }, 403);
+      if (target.removed_at) return new Response(null, { status: 204 });
+      if (target.datix_access) {
+        const [{ n }] = await sql`SELECT COUNT(*)::int AS n FROM users WHERE datix_access = TRUE AND active = TRUE AND role = 'ADMIN' AND id <> ${id}`;
+        if (n === 0) return json({ error: "This is the only admin with Datix access. Give another admin Datix access first." }, 400);
+      }
+      // Keep the account (records still show who did what) but end access:
+      // signed out, can't sign in, Datix access removed. The leaver retention
+      // period on /gdpr anonymises it later.
+      await sql`
+        UPDATE users SET active = FALSE, removed_at = now(), removed_by = ${auth.sub}, tokens_valid_after = now(),
+          deactivated_at = COALESCE(deactivated_at, now()), datix_access = FALSE, datix_role = NULL
+        WHERE id = ${id}
+      `;
+      await logGdpr(auth, "STAFF_REMOVED", `Staff account #${id} removed${target.datix_access ? " (Datix access removed)" : ""}`);
       return new Response(null, { status: 204 });
+    }
+
+    // Restore a removed staff member (not possible once anonymised).
+    const restoreMatch = path.match(/^\/api\/staff\/(\d+)\/restore$/);
+    if (restoreMatch && method === "POST") {
+      const auth = await getAuth(req);
+      if (!auth) return json({ error: "Unauthorized" }, 401);
+      if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+      const id = Number(restoreMatch[1]);
+      const [target] = await sql`SELECT id, role, removed_at, anonymised_at FROM users WHERE id = ${id}`;
+      if (!target || !target.removed_at) return json({ error: "Not found" }, 404);
+      if (target.anonymised_at) return json({ error: "This account has been anonymised and can't be restored. Add them as a new staff member." }, 400);
+      if (target.role === "ADMIN" && !isAdmin(auth)) return json({ error: "Only an admin can restore an admin account." }, 403);
+      await sql`UPDATE users SET active = TRUE, removed_at = NULL, removed_by = NULL, deactivated_at = NULL WHERE id = ${id}`;
+      await logGdpr(auth, "STAFF_RESTORED", `Staff account #${id} restored`);
+      return json({ ok: true });
     }
 
     if (path === "/api/incidents" && method === "GET") {

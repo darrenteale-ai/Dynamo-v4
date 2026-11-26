@@ -49,7 +49,7 @@ hr { display:none; }
 <body>
 <header><div class="wrap"><div class="logo">D</div><div>
 <h1>Dynamo User Guide</h1>
-<p>Incident reporting, medication, Datix, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.4, 26 November 2026</p>
+<p>Incident reporting, medication, Datix, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.5, 26 November 2026</p>
 </div><a class="back" href="/settings">← Back to Dynamo</a></div></header>
 <div class="layout">
 <nav aria-label="Contents"><div class="label">Contents</div><a href="#sec-1-introduction">1. Introduction</a><a href="#sec-2-reporting-an-incident-crew-qr-form">2. Reporting an incident (crew — QR form)</a><a href="#sec-3-reporting-an-incident-managers-inside-dynamo">3. Reporting an incident (managers — inside Dynamo)</a><a href="#sec-4-managing-incidents">4. Managing incidents</a><a href="#sec-5-harm-and-duty-of-candour">5. Harm and duty of candour</a><a href="#sec-6-riddor-and-cqc-reporting">6. RIDDOR and CQC reporting</a><a href="#sec-7-investigating-and-closing-an-incident">7. Investigating and closing an incident</a><a href="#sec-8-photos-actions-alerts-audit-trail-and-exports">8. Photos, actions, alerts, audit trail and exports</a><a href="#sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes, medication, Datix and fleet</a><a href="#sec-10-admin-tasks">10. Admin tasks</a><a href="#sec-11-quick-reference">11. Quick reference</a></nav>
@@ -508,16 +508,19 @@ hr { display:none; }
 <hr />
 <h2 id="sec-10-admin-tasks">10. Admin tasks</h2>
 <h3 id="sec-staff-accounts">Staff accounts</h3>
-<p>On the <strong>Staff</strong> page, admins and managers can add staff, change a person's name and phone, and deactivate leavers. Deactivating an account signs the person out immediately.</p>
+<p>On the <strong>Staff</strong> page, admins and managers can add staff, change a person's name and phone, and deactivate or remove leavers. The page has two tabs: <strong>Current staff</strong> and <strong>Removed staff</strong>.</p>
+<p><strong>Removing someone:</strong> click <strong>Remove</strong> on their row. They're signed out straight away, can't sign in, lose any Datix access, and move to the <strong>Removed staff</strong> tab. Their name stays on the incidents and records they worked on. Only an admin can remove an admin, and you can't remove yourself.</p>
+<p><strong>Removed staff tab:</strong> lists everyone removed, with the date and who removed them. Click <strong>Restore</strong> to bring someone back: they sign in with their existing password and two-factor sign-in, but Datix access has to be given again. Removed accounts are anonymised automatically after the leaver retention period on the data protection page (<code>/gdpr</code>); anonymised accounts show as "Former staff member" and can't be restored. To re-employ someone whose account was anonymised, add them as a new staff member.</p>
+<p><strong>Deactivate or remove?</strong> Set Status to Inactive (Edit) for someone who is away for a while; use Remove for leavers. Both sign the person out immediately.</p>
 <p><strong>Adding someone:</strong> click <strong>+ Add staff</strong> and enter their name and work email. You can set a password, or leave it blank and Dynamo shows a one-off temporary password. Give it to them securely and ask them to change it under Settings. At their first sign-in they set up two-factor sign-in.</p>
 <p><strong>Passwords</strong> must be at least 12 characters, not a common password (such as Password123!), and must not contain the person's email name.</p>
 <p><strong>Admins and managers:</strong></p>
 <ul>
 <li>Only an <strong>admin</strong> can give someone admin access, change or delete an admin account, or reset an admin's password or two-factor sign-in. Managers can manage other manager accounts.</li>
-<li>Nobody can give themselves admin access or delete their own account.</li>
+<li>Nobody can give themselves admin access or remove their own account.</li>
 <li>There must always be at least one active admin. Make someone else an admin before removing your own admin access. We recommend having at least two admins so each can help the other.</li>
 <li>Changing someone's role signs them out so the new role applies straight away.</li>
-<li>Admin changes, account deletions and two-factor resets are recorded in the data protection log.</li>
+<li>Admin changes, removals, restores and two-factor resets are recorded in the data protection log.</li>
 </ul>
 <p><strong>Datix access:</strong> the <strong>Datix</strong> column shows who can open Datix documents, with their role (for example Director or Clinical Team Manager). To give or remove access, an <strong>admin who already has Datix access</strong> opens the person (click their row) and ticks or unticks <strong>Can open Datix documents</strong> under Datix access, chooses their role and saves. Other admins and managers can't change it. No more than four people can have access; remove someone's access before giving it to someone new. There must always be at least one admin with access. Deactivating an account removes its Datix access. Every change is recorded in the data protection log.</p>
 <p><strong>Two-factor sign-in:</strong> the <strong>Two-factor</strong> column shows whether each person has set it up. <strong>Reset 2FA</strong> clears it, for example after a lost or new phone. The person is signed out and sets it up again at their next sign-in. Nobody can reset their own; use a recovery code or ask another admin.</p>
@@ -585,7 +588,7 @@ hr { display:none; }
 <li>find everything held about a person and download a subject access export (check and redact it before sending). Datix documents are matched on their details in Dynamo only, so open each listed file and check it by hand. <strong>Only admins with Datix access see Datix documents in the export</strong> (and in the anonymise review list); other admins are told how many matched and who to ask;</li>
 <li>anonymise a person following an erasure request;</li>
 <li>set retention periods, preview and run retention (including Datix documents, which are deleted a set number of months after upload, minimum 3 years; and medication records: after the period, names and notes are removed from drug bag sign-outs, bag history and stock movements; minimum 2 years);</li>
-<li>view the log of every data protection action, including exports, anonymisations, retention runs, admin access changes, staff deletions and two-factor set-ups and resets.</li>
+<li>view the log of every data protection action, including exports, anonymisations, retention runs, admin access changes, staff removals and restores and two-factor set-ups and resets.</li>
 </ul>
 <p>Retention is <strong>off until an admin enters the periods</strong>. Once set, it runs about once a day; use <strong>Preview</strong> first to see what would be removed.</p>
 <p>The <strong>Privacy notice</strong> (<code>/privacy</code>) explains to staff and the public what Dynamo holds and why.</p>
