@@ -862,10 +862,19 @@ function StaffModal({ staff, onClose, onSaved }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [createdTemp, setCreatedTemp] = useState(null);
+  const { user: me } = useAuth();
+  const iAmAdmin = me?.role === 'ADMIN';
+  // Managers can't give admin access or edit an admin's account (enforced on the server too).
+  const lockedAdmin = isEdit && staff.role === 'ADMIN' && !iAmAdmin;
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
+    if (password && password.length < 12) {
+      setError('Password must be at least 12 characters.');
+      return;
+    }
     setBusy(true);
     try {
       const payload = { name, email, phone, role, active };
@@ -873,7 +882,11 @@ function StaffModal({ staff, onClose, onSaved }) {
       if (isEdit) {
         await api.updateStaff(staff.id, payload);
       } else {
-        await api.createStaff(payload);
+        const created = await api.createStaff(payload);
+        if (created && created.tempPassword) {
+          setCreatedTemp({ name: created.name, email: created.email, tempPassword: created.tempPassword });
+          return;
+        }
       }
       onSaved();
     } catch (err) {
@@ -881,6 +894,26 @@ function StaffModal({ staff, onClose, onSaved }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (createdTemp) {
+    return (
+      <div className="modal-backdrop">
+        <div className="modal">
+          <div className="modal-header">
+            <h2>Staff member added</h2>
+          </div>
+          <p>{createdTemp.name} ({createdTemp.email}) can sign in with this temporary password. Share it securely — it won't be shown again. They should change it under Settings after signing in.</p>
+          <p style={{ fontFamily: 'monospace', fontSize: '1.2rem', fontWeight: 700, letterSpacing: '0.05em' }}>{createdTemp.tempPassword}</p>
+          <div className="modal-footer">
+            <div />
+            <div className="modal-footer-right">
+              <button type="button" className="btn btn-primary" onClick={onSaved}>Done</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -892,6 +925,7 @@ function StaffModal({ staff, onClose, onSaved }) {
         </div>
 
         {error && <div className="error-banner">{error}</div>}
+        {lockedAdmin && <div className="error-banner">Only an admin can change an admin account.</div>}
 
         <div className="form-grid">
           <div className="form-field">
@@ -917,14 +951,15 @@ function StaffModal({ staff, onClose, onSaved }) {
 
           <div className="form-field">
             <label>Role</label>
-            <select value={role} onChange={(e) => setRole(e.target.value)}>
-              {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+            <select value={role} onChange={(e) => setRole(e.target.value)} disabled={lockedAdmin}>
+              {ROLES.filter((r) => r !== 'ADMIN' || iAmAdmin || role === 'ADMIN').map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </div>
 
           <div className="form-field form-field-wide">
-            <label>{isEdit ? 'Reset password (optional)' : 'Password (optional, default Password123!)'}</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={isEdit ? 'Leave blank to keep current password' : 'Password123!'} />
+            <label>{isEdit ? 'Reset password (optional)' : 'Password (optional)'}</label>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={12} placeholder={isEdit ? 'Leave blank to keep current password' : 'Leave blank to generate a temporary password'} />
+            <small className="muted">At least 12 characters; not a common password or your email name.</small>
           </div>
         </div>
 
@@ -932,7 +967,7 @@ function StaffModal({ staff, onClose, onSaved }) {
           <div />
           <div className="modal-footer-right">
             <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
-            <button type="submit" className="btn btn-primary" disabled={busy}>
+            <button type="submit" className="btn btn-primary" disabled={busy || lockedAdmin}>
               {busy ? 'Saving…' : isEdit ? 'Update details & save' : 'Add staff member'}
             </button>
           </div>
@@ -2723,7 +2758,7 @@ function Settings() {
             </div>
             <div className="form-field">
               <label>New password</label>
-              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Leave blank to keep current" />
+              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 12 characters (leave blank to keep current)" />
             </div>
             <div className="form-field">
               <label>Confirm new password</label>

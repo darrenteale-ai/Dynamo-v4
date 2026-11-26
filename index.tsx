@@ -20,9 +20,17 @@ import { imageSize } from "image-size";
 import QRCode from "qrcode";
 import PDFDocument from "pdfkit";
 
-const JWT_SECRET = Bun.env.JWT_SECRET || "dev-secret-change-me";
+// No built-in fallback: a known default secret would let anyone forge a
+// sign-in token. Refuse to start without one.
+const JWT_SECRET = Bun.env.JWT_SECRET || "";
+if (!JWT_SECRET) throw new Error("JWT_SECRET is not set — refusing to start.");
+if (JWT_SECRET.length < 32) console.log("WARNING: JWT_SECRET is shorter than 32 characters; set a longer random value.");
 const SEED_ADMIN_EMAIL = Bun.env.SEED_ADMIN_EMAIL || "darren.teale@medicalemergencysolutions.co.uk";
-const SEED_ADMIN_PASSWORD = Bun.env.SEED_ADMIN_PASSWORD || "ChangeMe123!";
+// Only used when the admin account doesn't exist yet (a fresh database);
+// an existing admin's password is never changed by this. Without the
+// variable a random, unknown password is used, so there is never a known
+// default; set SEED_ADMIN_PASSWORD before first start on a new database.
+const SEED_ADMIN_PASSWORD = Bun.env.SEED_ADMIN_PASSWORD || crypto.randomUUID() + crypto.randomUUID();
 
 const s3 = new S3Client({
   accessKeyId: Bun.env.BUCKET_ACCESS_KEY_ID,
@@ -880,6 +888,10 @@ async function ensureSchema() {
   await sql`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS retention_inactive_staff_months INTEGER`;
   await sql`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS retention_last_run_at TIMESTAMPTZ`;
   await sql`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS retention_vdi_months INTEGER`;
+  // Medication records (drug bag sign-out/in and stock movements): names are
+  // removed after this many months; quantities, dates and bag numbers stay.
+  await sql`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS retention_med_months INTEGER`;
+  await sql`ALTER TABLE drug_bag_movements ADD COLUMN IF NOT EXISTS anonymised_at TIMESTAMPTZ`;
   // Accountability record (Art. 5(2)) of every subject-access export,
   // anonymisation and retention run. Holds no personal data beyond the
   // acting admin's name and a description of what was done.
@@ -959,11 +971,18 @@ function recordAttempt(key: string) {
   list.push(Date.now());
   attemptBuckets.set(key, list);
 }
+// The caller can put anything in X-Forwarded-For, so its first entry must
+// not be trusted (it let the per-IP login limit be bypassed). Railway's
+// edge sets X-Real-IP to the connecting client's address; failing that,
+// use the last X-Forwarded-For entry, which is the one the proxy appended.
 function clientIp(req: Request, server: any): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
   const real = req.headers.get("x-real-ip");
   if (real) return real.trim();
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff) {
+    const parts = xff.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
   try {
     return server?.requestIP(req)?.address || "unknown";
   } catch {
@@ -2207,6 +2226,25 @@ function sanitizeFileName(name: string) {
   return String(name || "file").replace(/[^a-zA-Z0-9._-]/g, "_").slice(-100);
 }
 
+// Password rule (Art. 32): at least 12 characters, not a well-known
+// password, and not built from the person's email name. Returns the
+// problem to show the user, or null if the password is acceptable.
+const COMMON_PASSWORDS = new Set([
+  "password", "password1", "password12", "password123", "password1234", "password123!", "changeme", "changeme123",
+  "changeme123!", "qwerty", "qwerty123", "qwertyuiop", "letmein", "welcome", "welcome1", "welcome123", "admin",
+  "admin123", "iloveyou", "123456789012", "111111111111", "abc123456789", "dynamo", "dynamo123", "ambulance",
+]);
+function passwordProblem(pw: any, email?: any): string | null {
+  const p = String(pw ?? "");
+  if (p.length < 12) return "Password must be at least 12 characters.";
+  if (p.length > 200) return "Password is too long (200 characters max).";
+  const lower = p.toLowerCase();
+  if (COMMON_PASSWORDS.has(lower) || /^(.)\1+$/.test(p)) return "That password is too common. Choose something harder to guess.";
+  const local = String(email ?? "").split("@")[0].toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (local.length >= 4 && lower.replace(/[^a-z0-9]/g, "").includes(local)) return "Password must not contain your email name.";
+  return null;
+}
+
 function genTempPassword() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
   const bytes = new Uint8Array(12);
@@ -2323,6 +2361,7 @@ async function renderPrivacyPage() {
 <li>Case notes: ${monthsLabel(r.caseNoteMonths, "in line with our records retention schedule")} after the last entry.</li>
 <li>Staff accounts: until ${monthsLabel(r.inactiveStaffMonths, "a reasonable period")} after the account is closed, then anonymised.</li>
 <li>Vehicle daily checks: ${monthsLabel(r.vdiMonths, "in line with our records retention schedule")} after the check, unless a defect from it is still open.</li>
+<li>Drug bag and medication stock records: ${monthsLabel(r.medMonths, "in line with our records retention schedule (at least 2 years)")} after the bag is returned or the stock movement is made, after which names and notes are removed. Bag numbers, dates and quantities are kept for medicines accountability.</li>
 <li>Equipment issue records: for as long as the item is held by the company, so that we can account for it; you can ask for your name to be removed once the item is returned.</li>
 </ul>
 
@@ -2395,6 +2434,7 @@ const GDPR_ADMIN_PAGE = `<!doctype html><html lang="en-GB"><head><meta charset="
         <div><label>Case notes (months, min 12)</label><input id="rCase" type="number" min="12"/></div>
         <div><label>Leaver accounts (months after deactivation)</label><input id="rStaff" type="number" min="1"/></div>
         <div><label>Vehicle checks (months, min 12)</label><input id="rVdi" type="number" min="12"/></div>
+        <div><label>Medication records — names removed (months, min 24)</label><input id="rMed" type="number" min="24"/></div>
       </div>
       <button id="rSave">Save</button> <button id="rPreview" class="ghost">Preview what would be removed</button>
       <p class="muted" id="rLast"></p>
@@ -2484,12 +2524,12 @@ $("anonBtn").onclick = async () => {
 };
 async function loadRetention() {
   const r = await api("/api/gdpr/retention");
-  $("rInc").value = r.incidentMonths ?? ""; $("rCase").value = r.caseNoteMonths ?? ""; $("rStaff").value = r.inactiveStaffMonths ?? ""; $("rVdi").value = r.vdiMonths ?? "";
+  $("rInc").value = r.incidentMonths ?? ""; $("rCase").value = r.caseNoteMonths ?? ""; $("rStaff").value = r.inactiveStaffMonths ?? ""; $("rVdi").value = r.vdiMonths ?? ""; $("rMed").value = r.medMonths ?? "";
   $("rLast").textContent = r.lastRunAt ? "Last run: " + new Date(r.lastRunAt).toLocaleString("en-GB") : "Not run yet.";
 }
 $("rSave").onclick = async () => {
   try {
-    await api("/api/gdpr/retention", { method: "PUT", body: JSON.stringify({ incidentMonths: $("rInc").value, caseNoteMonths: $("rCase").value, inactiveStaffMonths: $("rStaff").value, vdiMonths: $("rVdi").value }) });
+    await api("/api/gdpr/retention", { method: "PUT", body: JSON.stringify({ incidentMonths: $("rInc").value, caseNoteMonths: $("rCase").value, inactiveStaffMonths: $("rStaff").value, vdiMonths: $("rVdi").value, medMonths: $("rMed").value }) });
     await loadRetention(); $("rOut").innerHTML = '<p>Saved.</p>';
   } catch (e) { $("rOut").innerHTML = '<p class="warn">' + esc(e.message) + "</p>"; }
 };
@@ -2501,8 +2541,11 @@ $("rPreview").onclick = async () => {
       list("Incidents", p.incidents, (r) => esc(r.ref) + " — " + esc(new Date(r.occurredAt).toLocaleDateString("en-GB"))) +
       list("Case notes", p.caseNotes, (r) => esc(r.title)) +
       list("Leaver accounts", p.staff, (r) => esc(r.name)) +
-      list("Vehicle checks", p.vdiChecks, (r) => esc(r.vehicleReg) + " — " + esc(new Date(r.createdAt).toLocaleDateString("en-GB")));
-    $("rRunBox").hidden = !(p.incidents.length || p.caseNotes.length || p.staff.length || p.vdiChecks.length);
+      list("Vehicle checks", p.vdiChecks, (r) => esc(r.vehicleReg) + " — " + esc(new Date(r.createdAt).toLocaleDateString("en-GB"))) +
+      list("Drug bag sign-outs (names removed)", p.drugBagMovements, (r) => esc(r.bagNumber) + " — " + esc(new Date(r.signedOutAt).toLocaleDateString("en-GB"))) +
+      "<p>Drug bag history entries: " + p.drugBagEventCount + " · Stock movements: " + p.medMovementCount + " (names removed)</p>";
+    $("rRunBox").hidden = !(p.incidents.length || p.caseNotes.length || p.staff.length || p.vdiChecks.length ||
+      p.drugBagMovements.length || p.drugBagEventCount || p.medMovementCount);
   } catch (e) { $("rOut").innerHTML = '<p class="warn">' + esc(e.message) + "</p>"; }
 };
 $("rRun").onclick = async () => {
@@ -2859,7 +2902,7 @@ async function anonymiseSubject(
 async function getRetentionSettings() {
   const [row] = await sql`
     SELECT retention_incident_months, retention_case_note_months, retention_inactive_staff_months, retention_last_run_at,
-      retention_vdi_months
+      retention_vdi_months, retention_med_months
     FROM app_settings WHERE id = 1
   `;
   return {
@@ -2867,6 +2910,7 @@ async function getRetentionSettings() {
     caseNoteMonths: row?.retention_case_note_months ?? null,
     inactiveStaffMonths: row?.retention_inactive_staff_months ?? null,
     vdiMonths: row?.retention_vdi_months ?? null,
+    medMonths: row?.retention_med_months ?? null,
     lastRunAt: row?.retention_last_run_at ?? null,
   };
 }
@@ -2907,11 +2951,35 @@ async function retentionCandidates() {
         ORDER BY c.created_at ASC
       `
     : [];
-  return { settings: s, incidents, caseNotes, staff, vdiChecks };
+  // Medication records: returned drug bag sign-outs, bag history entries
+  // and stock movements older than the period that still carry names.
+  const drugBagMovements = s.medMonths
+    ? await sql`
+        SELECT m.id, m.signed_out_at, b.bag_number FROM drug_bag_movements m JOIN drug_bags b ON b.id = m.bag_id
+        WHERE m.returned_at IS NOT NULL AND m.anonymised_at IS NULL
+          AND m.returned_at < now() - make_interval(months => ${s.medMonths})
+        ORDER BY m.signed_out_at ASC
+      `
+    : [];
+  const [{ count: drugBagEventCount }] = s.medMonths
+    ? await sql`
+        SELECT COUNT(*)::int AS count FROM drug_bag_events
+        WHERE created_at < now() - make_interval(months => ${s.medMonths})
+          AND (actor_id IS NOT NULL OR actor_name IS NOT NULL OR details IS NOT NULL)
+      `
+    : [{ count: 0 }];
+  const [{ count: medMovementCount }] = s.medMonths
+    ? await sql`
+        SELECT COUNT(*)::int AS count FROM med_movements
+        WHERE created_at < now() - make_interval(months => ${s.medMonths})
+          AND (actor_id IS NOT NULL OR actor_name IS NOT NULL)
+      `
+    : [{ count: 0 }];
+  return { settings: s, incidents, caseNotes, staff, vdiChecks, drugBagMovements, drugBagEventCount, medMovementCount };
 }
 
 async function runRetention(auth: any) {
-  const { settings, incidents, caseNotes, staff, vdiChecks } = await retentionCandidates();
+  const { settings, incidents, caseNotes, staff, vdiChecks, drugBagMovements } = await retentionCandidates();
   let filesDeleted = 0;
   let fileErrors = 0;
   // Files are deleted from storage for incidents being anonymised now, and
@@ -2966,6 +3034,35 @@ async function runRetention(auth: any) {
     await sql`UPDATE vehicle_defects SET reported_by = NULL WHERE vdi_check_id = ${c.id}`;
     await sql`DELETE FROM vdi_checks WHERE id = ${c.id}`;
   }
+  let drugBagEventsAnonymised = 0;
+  let medMovementsAnonymised = 0;
+  if (settings.medMonths) {
+    // Keep the record (bag, dates, seal colours, whether drugs were used,
+    // quantities and balances) for medicines accountability; remove who.
+    const ids = (drugBagMovements as any[]).map((m) => m.id);
+    if (ids.length) {
+      await sql`
+        UPDATE drug_bag_movements SET signed_out_to = ${ANON_REPORTER}, second_crew = NULL, returned_by = NULL,
+          out_notes = NULL, return_notes = NULL, event_name = NULL, issued_by = NULL, received_by = NULL,
+          anonymised_at = now()
+        WHERE id IN ${sql(ids)}
+      `;
+    }
+    const ev = await sql`
+      UPDATE drug_bag_events SET actor_id = NULL, actor_name = NULL, details = NULL
+      WHERE created_at < now() - make_interval(months => ${settings.medMonths})
+        AND (actor_id IS NOT NULL OR actor_name IS NOT NULL OR details IS NOT NULL)
+      RETURNING id
+    `;
+    drugBagEventsAnonymised = ev.length;
+    const mm = await sql`
+      UPDATE med_movements SET actor_id = NULL, actor_name = NULL
+      WHERE created_at < now() - make_interval(months => ${settings.medMonths})
+        AND (actor_id IS NOT NULL OR actor_name IS NOT NULL)
+      RETURNING id
+    `;
+    medMovementsAnonymised = mm.length;
+  }
   await sql`UPDATE app_settings SET retention_last_run_at = now() WHERE id = 1`;
   const result = {
     incidentsAnonymised: incidents.length,
@@ -2974,12 +3071,16 @@ async function runRetention(auth: any) {
     caseNotesDeleted: caseNotes.length,
     leaverAccountsAnonymised: staff.length,
     vehicleChecksDeleted: vdiChecks.length,
+    drugBagSignOutsAnonymised: drugBagMovements.length,
+    drugBagHistoryAnonymised: drugBagEventsAnonymised,
+    stockMovementsAnonymised: medMovementsAnonymised,
   };
   await logGdpr(
     auth,
     "RETENTION_RUN",
     `Retention run (months — incidents ${settings.incidentMonths ?? "off"}, case notes ${settings.caseNoteMonths ?? "off"}, ` +
-      `leavers ${settings.inactiveStaffMonths ?? "off"}, vehicle checks ${settings.vdiMonths ?? "off"}): ` +
+      `leavers ${settings.inactiveStaffMonths ?? "off"}, vehicle checks ${settings.vdiMonths ?? "off"}, ` +
+      `medication ${settings.medMonths ?? "off"}): ` +
       Object.entries(result).map(([k, v]) => `${k} ${v}`).join(", ")
   );
   return result;
@@ -2993,7 +3094,7 @@ let retentionRunning = false;
 async function maybeRunRetention() {
   if (retentionRunning) return;
   const s = await getRetentionSettings();
-  if (!s.incidentMonths && !s.caseNoteMonths && !s.inactiveStaffMonths && !s.vdiMonths) return;
+  if (!s.incidentMonths && !s.caseNoteMonths && !s.inactiveStaffMonths && !s.vdiMonths && !s.medMonths) return;
   if (s.lastRunAt && Date.now() - new Date(s.lastRunAt).getTime() < 24 * 3600 * 1000) return;
   retentionRunning = true;
   try {
@@ -3099,7 +3200,7 @@ async function handleGdprRequest(req: Request, url: URL, path: string, method: s
       if (!Number.isFinite(n) || n < min || n > 600) throw new Error(`Retention periods must be between ${min} and 600 months`);
       return n;
     };
-    let incident, caseNote, staff, vdi;
+    let incident, caseNote, staff, vdi, med;
     try {
       // Floors stop an accidental "1" from wiping recent records:
       // incidents at least 3 years (RIDDOR records must be kept 3 years).
@@ -3107,15 +3208,17 @@ async function handleGdprRequest(req: Request, url: URL, path: string, method: s
       caseNote = clean(body.caseNoteMonths, 12);
       staff = clean(body.inactiveStaffMonths, 1);
       vdi = clean(body.vdiMonths, 12);
+      // Controlled drug records must be kept at least 2 years.
+      med = clean(body.medMonths, 24);
     } catch (err: any) {
       return json({ error: err.message }, 400);
     }
     await sql`
       UPDATE app_settings SET retention_incident_months = ${incident}, retention_case_note_months = ${caseNote},
-        retention_inactive_staff_months = ${staff}, retention_vdi_months = ${vdi}, updated_at = now()
+        retention_inactive_staff_months = ${staff}, retention_vdi_months = ${vdi}, retention_med_months = ${med}, updated_at = now()
       WHERE id = 1
     `;
-    await logGdpr(auth, "RETENTION_SETTINGS", `Retention set: incidents ${incident ?? "off"}, case notes ${caseNote ?? "off"}, leavers ${staff ?? "off"}, vehicle checks ${vdi ?? "off"} (months)`);
+    await logGdpr(auth, "RETENTION_SETTINGS", `Retention set: incidents ${incident ?? "off"}, case notes ${caseNote ?? "off"}, leavers ${staff ?? "off"}, vehicle checks ${vdi ?? "off"}, medication ${med ?? "off"} (months)`);
     return json(await getRetentionSettings());
   }
 
@@ -3127,6 +3230,9 @@ async function handleGdprRequest(req: Request, url: URL, path: string, method: s
       caseNotes: (c.caseNotes as any[]).map((r) => ({ id: r.id, title: r.title, lastActivity: r.last_activity })),
       staff: (c.staff as any[]).map((r) => ({ id: r.id, name: r.name, deactivatedAt: r.deactivated_at })),
       vdiChecks: (c.vdiChecks as any[]).map((r) => ({ id: r.id, vehicleReg: r.vehicle_reg, createdAt: r.created_at })),
+      drugBagMovements: (c.drugBagMovements as any[]).map((r) => ({ id: r.id, bagNumber: r.bag_number, signedOutAt: r.signed_out_at })),
+      drugBagEventCount: c.drugBagEventCount,
+      medMovementCount: c.medMovementCount,
     });
   }
 
@@ -4902,6 +5008,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         if (!current) return json({ error: "Not found" }, 404);
         const ok = await bcrypt.compare(body.currentPassword || "", current.password_hash);
         if (!ok) return json({ error: "Current password is incorrect" }, 400);
+        const problem = passwordProblem(body.newPassword, current.email);
+        if (problem) return json({ error: problem }, 400);
         const hash = await bcrypt.hash(body.newPassword, 10);
         await sql`UPDATE users SET password_hash = ${hash} WHERE id = ${auth.sub}`;
       }
@@ -4932,14 +5040,31 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       if (!auth) return json({ error: "Unauthorized" }, 401);
       if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
       const body = await req.json();
-      const hash = await bcrypt.hash(body.password || "Password123!", 10);
+      // Only admins can create admin accounts (admins hold the data
+      // protection tools, so a manager must not be able to make one).
+      if (body.role === "ADMIN" && !isAdmin(auth)) {
+        return json({ error: "Only an admin can create an admin account." }, 403);
+      }
+      // No default password: use the one given (if strong enough) or
+      // generate a one-off temporary password and show it once.
+      let tempPassword: string | null = null;
+      if (body.password) {
+        const problem = passwordProblem(body.password, body.email);
+        if (problem) return json({ error: problem }, 400);
+      } else {
+        tempPassword = genTempPassword();
+      }
+      const hash = await bcrypt.hash(body.password || tempPassword!, 10);
       try {
         const [row] = await sql`
           INSERT INTO users (name, email, password_hash, phone, role, active)
           VALUES (${body.name}, ${body.email}, ${hash}, ${body.phone || null}, ${body.role === "ADMIN" ? "ADMIN" : "MANAGER"}, ${body.active !== undefined ? body.active : true})
           RETURNING id, name, email, phone, role, active
         `;
-        return json(row, 201);
+        if (row.role === "ADMIN") {
+          await logGdpr(auth, "ADMIN_GRANTED", `Admin account created for staff account #${row.id}`);
+        }
+        return json({ ...row, tempPassword }, 201);
       } catch (err: any) {
         if (String(err?.message || "").includes("duplicate key")) {
           return json({ error: "That email is already in use" }, 400);
@@ -4955,6 +5080,12 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       const body = await req.json();
       const userIds: number[] = Array.isArray(body.userIds) ? body.userIds.map((n: any) => Number(n)).filter((n: number) => Number.isInteger(n)) : [];
       if (userIds.length === 0) return json({ error: "Select at least one staff member" }, 400);
+      // A manager resetting an admin's password would get that admin's
+      // access (including the data protection tools), so only admins may.
+      if (!isAdmin(auth)) {
+        const admins = await sql`SELECT id FROM users WHERE id IN ${sql(userIds)} AND role = 'ADMIN'`;
+        if (admins.length) return json({ error: "Only an admin can reset an admin's password." }, 403);
+      }
       const results: { id: number; name: string; email: string; tempPassword: string }[] = [];
       for (const id of userIds) {
         const [row] = await sql`SELECT id, name, email FROM users WHERE id = ${id}`;
@@ -4983,7 +5114,23 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
       const id = Number(staffIdMatch[1]);
       const body = await req.json();
+      const [target] = await sql`SELECT id, email, role, active FROM users WHERE id = ${id}`;
+      if (!target) return json({ error: "Not found" }, 404);
+      const newRole = body.role === "ADMIN" ? "ADMIN" : "MANAGER";
+      const newActive = body.active !== undefined ? body.active : true;
+      if (!isAdmin(auth)) {
+        // Managers can't edit admin accounts or grant admin, including to themselves.
+        if (target.role === "ADMIN") return json({ error: "Only an admin can change an admin account." }, 403);
+        if (newRole === "ADMIN") return json({ error: "Only an admin can give someone admin access." }, 403);
+      }
+      // Never leave the system without an active admin.
+      if (target.role === "ADMIN" && target.active && (newRole !== "ADMIN" || newActive === false)) {
+        const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM users WHERE role = 'ADMIN' AND active = TRUE AND id <> ${id}`;
+        if (count === 0) return json({ error: "This is the only active admin. Make someone else an admin first." }, 400);
+      }
       if (body.password) {
+        const problem = passwordProblem(body.password, target.email);
+        if (problem) return json({ error: problem }, 400);
         const hash = await bcrypt.hash(body.password, 10);
         await sql`UPDATE users SET password_hash = ${hash}, tokens_valid_after = now() WHERE id = ${id}`;
       }
@@ -4996,10 +5143,16 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       }
       const [row] = await sql`
         UPDATE users SET name = ${body.name}, phone = ${body.phone || null},
-          role = ${body.role === "ADMIN" ? "ADMIN" : "MANAGER"}, active = ${body.active !== undefined ? body.active : true}
+          role = ${newRole}, active = ${newActive}
         WHERE id = ${id} RETURNING id, name, email, phone, role, active
       `;
       if (!row) return json({ error: "Not found" }, 404);
+      if (target.role !== newRole) {
+        // A role change ends the person's current sessions so the new role applies at once.
+        await sql`UPDATE users SET tokens_valid_after = now() WHERE id = ${id}`;
+        await logGdpr(auth, newRole === "ADMIN" ? "ADMIN_GRANTED" : "ADMIN_REMOVED",
+          `Staff account #${id} ${newRole === "ADMIN" ? "given" : "removed from"} admin access`);
+      }
       return json(serializeStaff(row));
     }
 
@@ -5009,7 +5162,11 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
       const id = Number(staffIdMatch[1]);
       if (id === auth.sub) return json({ error: "You cannot delete your own account" }, 400);
+      const [target] = await sql`SELECT id, role FROM users WHERE id = ${id}`;
+      if (!target) return new Response(null, { status: 204 });
+      if (target.role === "ADMIN" && !isAdmin(auth)) return json({ error: "Only an admin can delete an admin account." }, 403);
       await sql`DELETE FROM users WHERE id = ${id}`;
+      await logGdpr(auth, "STAFF_DELETED", `Staff account #${id} deleted`);
       return new Response(null, { status: 204 });
     }
 

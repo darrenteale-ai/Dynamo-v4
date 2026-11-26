@@ -452,7 +452,13 @@ hr { display:none; }
 <hr />
 <h2 id="sec-10-admin-tasks">10. Admin tasks</h2>
 <h3 id="sec-staff-accounts">Staff accounts</h3>
-<p>On the <strong>Staff</strong> page, admins and managers can <strong>+ Add staff</strong>, change a person's name, phone and role (Manager or Admin), and deactivate leavers. Deactivating an account signs the person out immediately.</p>
+<p>On the <strong>Staff</strong> page, admins and managers can <strong>+ Add staff</strong>, change a person's name and phone, and deactivate leavers. Deactivating an account signs the person out immediately.</p>
+<ul>
+<li>Only an <strong>admin</strong> can give someone admin access, change or delete an admin account, or reset an admin's password. Changing someone's role signs them out so the new role applies straight away. Every admin change is recorded in the data protection log.</li>
+<li>There must always be at least one active admin.</li>
+<li>Passwords must be at least 12 characters, not a common password, and not contain your email name.</li>
+<li>If you add someone without a password, Dynamo shows a one-off temporary password. Give it to them securely and ask them to change it under Settings.</li>
+</ul>
 <h3 id="sec-settings">Settings</h3>
 <ul>
 <li><strong>User guide</strong> — opens this guide.</li>
@@ -514,7 +520,7 @@ hr { display:none; }
 <ul>
 <li>find everything held about a person and download a subject access export (check and redact it before sending);</li>
 <li>anonymise a person following an erasure request;</li>
-<li>set retention periods, preview and run retention;</li>
+<li>set retention periods, preview and run retention (including medication records: after the period, names and notes are removed from drug bag sign-outs, bag history and stock movements; minimum 2 years);</li>
 <li>view the log of every data protection action.</li>
 </ul>
 <p>The <strong>Privacy notice</strong> (<code>/privacy</code>) explains to staff and the public what Dynamo holds and why.</p>
