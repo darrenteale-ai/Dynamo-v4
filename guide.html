@@ -48,13 +48,13 @@ hr { display:none; }
 <body>
 <header><div class="wrap"><div class="logo">D</div><div>
 <h1>Dynamo User Guide</h1>
-<p>Incident reporting, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.0, 13 November 2026</p>
+<p>Incident reporting, medication, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.1, 26 November 2026</p>
 </div><a class="back" href="/settings">← Back to Dynamo</a></div></header>
 <div class="layout">
 <nav aria-label="Contents"><div class="label">Contents</div><a href="#sec-1-introduction">1. Introduction</a><a href="#sec-2-reporting-an-incident-crew-qr-form">2. Reporting an incident (crew — QR form)</a><a href="#sec-3-reporting-an-incident-managers-inside-dynamo">3. Reporting an incident (managers — inside Dynamo)</a><a href="#sec-4-managing-incidents">4. Managing incidents</a><a href="#sec-5-harm-and-duty-of-candour">5. Harm and duty of candour</a><a href="#sec-6-riddor-and-cqc-reporting">6. RIDDOR and CQC reporting</a><a href="#sec-7-investigating-and-closing-an-incident">7. Investigating and closing an incident</a><a href="#sec-8-photos-actions-alerts-audit-trail-and-exports">8. Photos, actions, alerts, audit trail and exports</a><a href="#sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes and fleet</a><a href="#sec-10-admin-tasks">10. Admin tasks</a><a href="#sec-11-quick-reference">11. Quick reference</a></nav>
 <main>
 <h2 id="sec-1-introduction">1. Introduction</h2>
-<p>Dynamo is where we record, investigate and learn from incidents, near misses, complaints and safety concerns. It also keeps track of our legal reporting duties (duty of candour, RIDDOR and CQC notifications) and runs vehicle daily checks.</p>
+<p>Dynamo is where we record, investigate and learn from incidents, near misses, complaints and safety concerns. It also keeps track of our legal reporting duties (duty of candour, RIDDOR and CQC notifications) runs vehicle daily checks, and tracks drug bags and medication stock.</p>
 <p>There are two ways people use Dynamo:</p>
 <div class="tbl"><table>
 <thead>
@@ -67,7 +67,7 @@ hr { display:none; }
 <tbody>
 <tr>
 <td><strong>Crew and staff on shift</strong></td>
-<td>Scan a QR code to report an incident or complete a vehicle daily check</td>
+<td>Scan a QR code to report an incident, complete a vehicle daily check, or sign a drug bag out or back in</td>
 <td>No</td>
 </tr>
 <tr>
@@ -83,7 +83,7 @@ hr { display:none; }
 <li>Go to the Dynamo web address and enter your work email and password.</li>
 <li>Enter the 6-digit code from the authenticator app on your phone (two-factor sign-in). Everyone with an account must use it.</li>
 <li>Your session lasts 12 hours, then you'll need to sign in again.</li>
-<li>After 5 wrong passwords your account is locked for 15 minutes. If you've forgotten your password, ask an admin to reset it (see section 10).</li>
+<li>After 5 wrong passwords your account is locked for 15 minutes. If you've forgotten your password, ask an admin or manager to reset it (see section 10). Resetting your password doesn't remove two-factor sign-in, so you'll still need your phone or a recovery code.</li>
 </ol>
 <h3 id="sec-two-factor-sign-in">Two-factor sign-in</h3>
 <p><strong>First time:</strong> after your password, Dynamo asks you to set up two-factor sign-in.</p>
@@ -93,7 +93,7 @@ hr { display:none; }
 <li>Enter the 6-digit code the app shows, and select <strong>Turn on two-factor sign-in</strong>.</li>
 <li>Dynamo shows 10 <strong>recovery codes</strong>. Copy or download them and keep them somewhere safe (not on the same phone). Each one lets you sign in once if you don't have your phone.</li>
 </ol>
-<p><strong>Lost or new phone:</strong> on the code screen select <strong>Lost your phone? Use a recovery code</strong>, or ask an admin to reset your two-factor sign-in (Staff page → <strong>Reset 2FA</strong>). After a reset you set it up again at your next sign-in.</p>
+<p><strong>Lost or new phone:</strong> on the code screen select <strong>Lost your phone? Use a recovery code</strong>, or ask an admin or manager to reset your two-factor sign-in (Staff page → <strong>Reset 2FA</strong>). After a reset you set it up again at your next sign-in.</p>
 <p><strong>Running low on recovery codes:</strong> go to Settings → Two-factor sign-in and enter a code from your app to get 10 new ones (the old ones stop working).</p>
 <p>After 5 wrong codes, the code step is locked for 15 minutes.</p>
 <h3 id="sec-finding-your-way-around">Finding your way around</h3>
@@ -424,7 +424,7 @@ hr { display:none; }
 <li><strong>Charts:</strong> stock issued and drug bag sign-outs per week (last 12 weeks), the most issued medicines and what stock was issued for (last 30 days), waste by reason (last 90 days), and an expiry outlook by month.</li>
 </ul>
 <h3 id="sec-medication-drug-bags">Medication (drug bags)</h3>
-<p>The <strong>Drug Bag Sign In / Sign Out</strong> page (under Medication in the sidebar) tracks every drug bag: who has it, its seal number and the earliest expiry date of the items inside.</p>
+<p>The <strong>Drug Bag Sign In / Sign Out</strong> page (under Medication in the sidebar) tracks every drug bag: who has it, its seal colour and the earliest expiry date of the items inside.</p>
 <ul>
 <li><strong>Add bag numbers</strong> with <strong>+ Add bag</strong>, or from the bag number dropdown when signing out (choose <strong>+ Add a new bag number…</strong>).</li>
 <li><strong>Sign out a bag</strong> — choose the bag number, the <strong>seal colour</strong> (green or yellow), whether it's for <strong>Events or Frontline</strong> (for events, enter the event you're attending), the crew member it's signed out to (and the second crew member), the vehicle and call sign, then tick to confirm the seal is intact. Only bags that are available and in date appear in the dropdown.</li>
@@ -464,20 +464,25 @@ hr { display:none; }
 <hr />
 <h2 id="sec-10-admin-tasks">10. Admin tasks</h2>
 <h3 id="sec-staff-accounts">Staff accounts</h3>
-<p>On the <strong>Staff</strong> page, admins and managers can <strong>+ Add staff</strong>, change a person's name and phone, and deactivate leavers. Deactivating an account signs the person out immediately.</p>
+<p>On the <strong>Staff</strong> page, admins and managers can add staff, change a person's name and phone, and deactivate leavers. Deactivating an account signs the person out immediately.</p>
+<p><strong>Adding someone:</strong> click <strong>+ Add staff</strong> and enter their name and work email. You can set a password, or leave it blank and Dynamo shows a one-off temporary password. Give it to them securely and ask them to change it under Settings. At their first sign-in they set up two-factor sign-in.</p>
+<p><strong>Passwords</strong> must be at least 12 characters, not a common password (such as Password123!), and must not contain the person's email name.</p>
+<p><strong>Admins and managers:</strong></p>
 <ul>
-<li>Only an <strong>admin</strong> can give someone admin access, change or delete an admin account, or reset an admin's password. Changing someone's role signs them out so the new role applies straight away. Every admin change is recorded in the data protection log.</li>
-<li>There must always be at least one active admin.</li>
-<li>Passwords must be at least 12 characters, not a common password, and not contain your email name.</li>
-<li>The <strong>Two-factor</strong> column shows who has set it up. <strong>Reset 2FA</strong> clears someone's two-factor sign-in (for example after a lost phone); they're signed out and set it up again next time. Only an admin can reset an admin, and nobody can reset their own.</li>
-<li>If the only admin loses both their phone and recovery codes: in Railway, set the variable <code>MFA_RESET_EMAIL</code> to their email, let Dynamo restart, then delete the variable. The reset is logged.</li>
-<li>If you add someone without a password, Dynamo shows a one-off temporary password. Give it to them securely and ask them to change it under Settings.</li>
+<li>Only an <strong>admin</strong> can give someone admin access, change or delete an admin account, or reset an admin's password or two-factor sign-in. Managers can manage other manager accounts.</li>
+<li>Nobody can give themselves admin access or delete their own account.</li>
+<li>There must always be at least one active admin. Make someone else an admin before removing your own admin access. We recommend having at least two admins so each can help the other.</li>
+<li>Changing someone's role signs them out so the new role applies straight away.</li>
+<li>Admin changes, account deletions and two-factor resets are recorded in the data protection log.</li>
 </ul>
+<p><strong>Two-factor sign-in:</strong> the <strong>Two-factor</strong> column shows whether each person has set it up. <strong>Reset 2FA</strong> clears it, for example after a lost or new phone. The person is signed out and sets it up again at their next sign-in. Nobody can reset their own; use a recovery code or ask another admin.</p>
+<p><strong>If the only admin has lost both their phone and their recovery codes:</strong> whoever manages the hosting (Railway) sets the variable <code>MFA_RESET_EMAIL</code> to that admin's email and lets Dynamo restart. The admin then signs in and sets up two-factor again. Delete the variable straight afterwards. The reset is logged.</p>
 <h3 id="sec-settings">Settings</h3>
 <ul>
 <li><strong>User guide</strong> — opens this guide.</li>
-<li><strong>My details</strong> and <strong>Change password</strong> — for everyone.</li>
-<li><strong>Password reset</strong> — select staff and generate temporary passwords. Give each person their temporary password securely and ask them to change it after signing in.</li>
+<li><strong>My details</strong> and <strong>Change password</strong> — for everyone. New passwords must be at least 12 characters.</li>
+<li><strong>Two-factor sign-in</strong> — for everyone. Shows when you set it up and how many recovery codes you have left. Enter a code from your app to get 10 new recovery codes (the old ones stop working).</li>
+<li><strong>Password reset</strong> — select staff and generate temporary passwords. Give each person their temporary password securely and ask them to change it after signing in. Only an admin can reset an admin's password. A password reset doesn't remove two-factor sign-in.</li>
 <li><strong>Incident response SLA</strong> — days to respond (1–5), hours to allocate a manager, and the duty of candour target.</li>
 <li><strong>Weekly summary email</strong> — click <strong>Send weekly digest now</strong> to email the summary of open, overdue and regulatory items to all managers and admins.</li>
 </ul>
@@ -530,13 +535,14 @@ hr { display:none; }
 </table></div>
 <p>Alert emails never include the incident description, because it may contain patient information. Open the incident in Dynamo to read it. If emails aren't arriving, ask an admin to check that email sending is set up.</p>
 <h3 id="sec-data-protection-admins">Data protection (admins)</h3>
-<p>The <strong>Data protection tools</strong> page (<code>/gdpr</code>) lets admins:</p>
+<p>The <strong>Data protection tools</strong> page (<code>/gdpr</code>) is for admins only. Sign in with your password and then your two-factor code (or a recovery code). It lets admins:</p>
 <ul>
 <li>find everything held about a person and download a subject access export (check and redact it before sending);</li>
 <li>anonymise a person following an erasure request;</li>
 <li>set retention periods, preview and run retention (including medication records: after the period, names and notes are removed from drug bag sign-outs, bag history and stock movements; minimum 2 years);</li>
-<li>view the log of every data protection action.</li>
+<li>view the log of every data protection action, including exports, anonymisations, retention runs, admin access changes, staff deletions and two-factor set-ups and resets.</li>
 </ul>
+<p>Retention is <strong>off until an admin enters the periods</strong>. Once set, it runs about once a day; use <strong>Preview</strong> first to see what would be removed.</p>
 <p>The <strong>Privacy notice</strong> (<code>/privacy</code>) explains to staff and the public what Dynamo holds and why.</p>
 <hr />
 <h2 id="sec-11-quick-reference">11. Quick reference</h2>
@@ -593,7 +599,13 @@ Set the status to Closed and read the checklist that appears. Everything listed 
 <p><strong>Can I reopen a closed incident?</strong>
 No. Log a new incident and link it with <em>Related / duplicate incident</em>.</p>
 <p><strong>I've forgotten my password.</strong>
-Ask an admin to issue a temporary password from Settings → Password reset.</p>
+Ask an admin or manager to issue a temporary password from Settings → Password reset (only an admin can reset an admin's). You'll still need your two-factor code after the new password.</p>
+<p><strong>I've lost my phone or got a new one.</strong>
+On the code screen, select <strong>Lost your phone? Use a recovery code</strong>. Then ask an admin or manager to reset your two-factor sign-in on the Staff page, and set it up on your new phone at your next sign-in.</p>
+<p><strong>My code isn't accepted.</strong>
+Use the newest code in the app, and check your phone's date and time are set automatically. Each code works once. After 5 wrong codes, wait 15 minutes.</p>
+<p><strong>Do crew need two-factor sign-in?</strong>
+No. Crew use the QR forms (incident report, vehicle check, drug bag), which don't need an account.</p>
 <p><strong>The incident says "Candour: decide". What do I do?</strong>
 The harm level is moderate or worse. Decide whether it's a notifiable safety incident (section 5) and save.</p>
 <p><strong>Who can see that I opened an incident?</strong>
