@@ -81,9 +81,21 @@ hr { display:none; }
 <h3 id="sec-signing-in">Signing in</h3>
 <ol>
 <li>Go to the Dynamo web address and enter your work email and password.</li>
+<li>Enter the 6-digit code from the authenticator app on your phone (two-factor sign-in). Everyone with an account must use it.</li>
 <li>Your session lasts 12 hours, then you'll need to sign in again.</li>
 <li>After 5 wrong passwords your account is locked for 15 minutes. If you've forgotten your password, ask an admin to reset it (see section 10).</li>
 </ol>
+<h3 id="sec-two-factor-sign-in">Two-factor sign-in</h3>
+<p><strong>First time:</strong> after your password, Dynamo asks you to set up two-factor sign-in.</p>
+<ol>
+<li>Install an authenticator app on your phone, for example Microsoft Authenticator or Google Authenticator.</li>
+<li>In the app, add an account and scan the QR code Dynamo shows. If you can't scan it, type in the key shown under "Can't scan it?".</li>
+<li>Enter the 6-digit code the app shows, and select <strong>Turn on two-factor sign-in</strong>.</li>
+<li>Dynamo shows 10 <strong>recovery codes</strong>. Copy or download them and keep them somewhere safe (not on the same phone). Each one lets you sign in once if you don't have your phone.</li>
+</ol>
+<p><strong>Lost or new phone:</strong> on the code screen select <strong>Lost your phone? Use a recovery code</strong>, or ask an admin to reset your two-factor sign-in (Staff page → <strong>Reset 2FA</strong>). After a reset you set it up again at your next sign-in.</p>
+<p><strong>Running low on recovery codes:</strong> go to Settings → Two-factor sign-in and enter a code from your app to get 10 new ones (the old ones stop working).</p>
+<p>After 5 wrong codes, the code step is locked for 15 minutes.</p>
 <h3 id="sec-finding-your-way-around">Finding your way around</h3>
 <p>The sidebar on the left has these pages:</p>
 <ul>
@@ -457,6 +469,8 @@ hr { display:none; }
 <li>Only an <strong>admin</strong> can give someone admin access, change or delete an admin account, or reset an admin's password. Changing someone's role signs them out so the new role applies straight away. Every admin change is recorded in the data protection log.</li>
 <li>There must always be at least one active admin.</li>
 <li>Passwords must be at least 12 characters, not a common password, and not contain your email name.</li>
+<li>The <strong>Two-factor</strong> column shows who has set it up. <strong>Reset 2FA</strong> clears someone's two-factor sign-in (for example after a lost phone); they're signed out and set it up again next time. Only an admin can reset an admin, and nobody can reset their own.</li>
+<li>If the only admin loses both their phone and recovery codes: in Railway, set the variable <code>MFA_RESET_EMAIL</code> to their email, let Dynamo restart, then delete the variable. The reset is logged.</li>
 <li>If you add someone without a password, Dynamo shows a one-off temporary password. Give it to them securely and ask them to change it under Settings.</li>
 </ul>
 <h3 id="sec-settings">Settings</h3>

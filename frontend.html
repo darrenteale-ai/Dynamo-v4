@@ -548,6 +548,12 @@ async function request(path, { method = 'GET', body, params } = {}) {
 
 const api = {
   login: (email, password) => request('/auth/login', { method: 'POST', body: { email, password } }),
+  mfaVerify: (data) => request('/auth/mfa/verify', { method: 'POST', body: data }),
+  mfaSetup: (data) => request('/auth/mfa/setup', { method: 'POST', body: data || {} }),
+  mfaEnable: (data) => request('/auth/mfa/enable', { method: 'POST', body: data }),
+  getMyMfa: () => request('/me/mfa'),
+  renewRecoveryCodes: (code) => request('/me/mfa/recovery-codes', { method: 'POST', body: { code } }),
+  resetStaffMfa: (id) => request(`/staff/${id}/mfa-reset`, { method: 'POST' }),
   me: () => request('/auth/me'),
   updateMe: (data) => request('/me', { method: 'PUT', body: data }),
   listStaff: () => request('/staff'),
@@ -714,11 +720,17 @@ function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
+  // Step 1 of sign-in. Returns the server's answer: either a session, or
+  // { mfaRequired | mfaSetupRequired, mfaToken } for the second step.
   async function login(email, password) {
-    const { token, user } = await api.login(email, password);
-    setToken(token);
-    setUser(user);
-    return user;
+    const res = await api.login(email, password);
+    if (res.token) finishLogin(res);
+    return res;
+  }
+
+  function finishLogin(res) {
+    setToken(res.token);
+    setUser(res.user);
   }
 
   function logout() {
@@ -733,7 +745,7 @@ function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, loading, login, finishLogin, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );
@@ -2416,23 +2428,137 @@ function IncidentDetailModal({ incident, onClose, onSaved }) {
 
 
 
-function Login() {
-  const { user, login, loading } = useAuth();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+// ---- Two-factor sign-in pieces (shared by sign-in and Settings) ----
+
+function MfaSetupPanel({ mfaToken, onEnabled, onRestart }) {
+  const [info, setInfo] = useState(null);
+  const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const navigate = useNavigate();
 
-  if (!loading && user) return <Navigate to="/dashboard" replace />;
+  useEffect(() => {
+    api.mfaSetup(mfaToken ? { mfaToken } : {}).then(setInfo).catch((err) => setError(err.message || 'Could not start set-up'));
+  }, []);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
     setBusy(true);
     try {
-      await login(email, password);
-      navigate('/dashboard');
+      const res = await api.mfaEnable({ ...(mfaToken ? { mfaToken } : {}), code: code.replace(/\s/g, '') });
+      onEnabled(res);
+    } catch (err) {
+      setError(err.message || 'That code didn’t work');
+      if (/sign in again|start the set-up again/i.test(err.message || '') && onRestart) onRestart(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <p style={{ margin: 0, fontSize: 14 }}>
+        Two-factor sign-in protects patient and staff information. Install an authenticator app on your phone
+        (for example Microsoft Authenticator or Google Authenticator), then scan this code with it.
+      </p>
+      {error && <div className="error-banner">{error}</div>}
+      {!info ? (
+        !error && <div className="muted">Preparing…</div>
+      ) : (
+        <>
+          <div style={{ width: 200, maxWidth: '100%', alignSelf: 'center', background: '#fff', padding: 6, borderRadius: 8 }}
+            dangerouslySetInnerHTML={{ __html: info.qrSvg }} />
+          <details style={{ fontSize: 13 }}>
+            <summary>Can't scan it? Enter this key instead</summary>
+            <div style={{ fontFamily: 'monospace', fontSize: 14, marginTop: 6, wordBreak: 'break-all' }}>{info.secret}</div>
+          </details>
+          <label>Enter the 6-digit code from the app</label>
+          <input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9 ]*" maxLength={7} value={code}
+            onChange={(e) => setCode(e.target.value)} required autoFocus placeholder="123456" />
+          <button className="btn btn-primary" type="submit" disabled={busy || code.replace(/\s/g, '').length !== 6}>
+            {busy ? 'Checking…' : 'Turn on two-factor sign-in'}
+          </button>
+        </>
+      )}
+    </form>
+  );
+}
+
+function RecoveryCodesView({ codes, onContinue, continueLabel }) {
+  const [copied, setCopied] = useState(false);
+  const text = 'Dynamo recovery codes (each works once)\n\n' + codes.join('\n') + '\n';
+  function download() {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    a.download = 'dynamo-recovery-codes.txt';
+    a.click();
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <p style={{ margin: 0, fontSize: 14 }}>
+        <strong>Save these recovery codes somewhere safe.</strong> If you lose your phone, each code lets you sign in once.
+        They won't be shown again.
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontFamily: 'monospace', fontSize: 15,
+        background: 'var(--bg)', padding: 12, borderRadius: 8 }}>
+        {codes.map((c) => <div key={c}>{c}</div>)}
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => {
+          navigator.clipboard?.writeText(text).then(() => setCopied(true)).catch(() => {});
+        }}>{copied ? 'Copied' : 'Copy'}</button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={download}>Download</button>
+      </div>
+      {onContinue && <button type="button" className="btn btn-primary" onClick={onContinue}>{continueLabel || 'I’ve saved them — continue'}</button>}
+    </div>
+  );
+}
+
+function Login() {
+  const { user, login, finishLogin, loading } = useAuth();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  // 'password' | 'code' | 'setup' | 'codes' | 'lowCodes'
+  const [stage, setStage] = useState('password');
+  const [mfaToken, setMfaToken] = useState(null);
+  const [code, setCode] = useState('');
+  const [useRecovery, setUseRecovery] = useState(false);
+  const [pending, setPending] = useState(null); // session held back while recovery codes are shown
+  const navigate = useNavigate();
+
+  if (!loading && user) return <Navigate to="/dashboard" replace />;
+
+  function restart(message) {
+    setStage('password');
+    setMfaToken(null);
+    setCode('');
+    setPassword('');
+    setUseRecovery(false);
+    setError(message || '');
+  }
+
+  function done(res) {
+    finishLogin(res);
+    navigate('/dashboard');
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const res = await login(email, password);
+      if (res.token) {
+        navigate('/dashboard');
+      } else if (res.mfaRequired) {
+        setMfaToken(res.mfaToken);
+        setStage('code');
+      } else if (res.mfaSetupRequired) {
+        setMfaToken(res.mfaToken);
+        setStage('setup');
+      }
     } catch (err) {
       setError(err.message || 'Login failed');
     } finally {
@@ -2440,16 +2566,116 @@ function Login() {
     }
   }
 
+  async function handleCode(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const res = await api.mfaVerify(useRecovery ? { mfaToken, recoveryCode: code } : { mfaToken, code: code.replace(/\s/g, '') });
+      if (useRecovery && res.recoveryCodesLeft <= 3) {
+        setPending(res);
+        setStage('lowCodes');
+      } else {
+        done(res);
+      }
+    } catch (err) {
+      if (/sign in again/i.test(err.message || '')) restart(err.message);
+      else setError(err.message || 'That code didn’t work');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const brand = (
+    <div className="login-brand">
+      <div className="brand-icon brand-icon-light">
+        <span className="brand-icon-letter">D</span>
+        <span className="brand-icon-dot"></span>
+      </div>
+      DYNAMO
+    </div>
+  );
+
+  if (stage === 'setup') {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          {brand}
+          <h1>Set up two-factor sign-in</h1>
+          {error && <div className="error-banner">{error}</div>}
+          <MfaSetupPanel mfaToken={mfaToken} onRestart={restart}
+            onEnabled={(res) => { setPending(res); setStage('codes'); }} />
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => restart()}>Back to sign in</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (stage === 'codes' && pending) {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          {brand}
+          <h1>Two-factor sign-in is on</h1>
+          <RecoveryCodesView codes={pending.recoveryCodes} onContinue={() => done(pending)} />
+        </div>
+      </div>
+    );
+  }
+
+  if (stage === 'lowCodes' && pending) {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          {brand}
+          <h1>Recovery codes running low</h1>
+          <p style={{ margin: 0, fontSize: 14 }}>
+            You have {pending.recoveryCodesLeft} recovery code{pending.recoveryCodesLeft === 1 ? '' : 's'} left.
+            If you've lost your phone, ask an admin to reset your two-factor sign-in so you can set it up on a new one.
+            Otherwise, get new codes under Settings → Two-factor sign-in.
+          </p>
+          <button className="btn btn-primary" type="button" onClick={() => done(pending)}>Continue</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (stage === 'code') {
+    return (
+      <div className="login-page">
+        <form className="login-card" onSubmit={handleCode}>
+          {brand}
+          <h1>Enter your code</h1>
+          {error && <div className="error-banner">{error}</div>}
+          {useRecovery ? (
+            <>
+              <label>Recovery code</label>
+              <input key="rc" value={code} onChange={(e) => setCode(e.target.value)} required autoFocus
+                placeholder="XXXXX-XXXXX" autoComplete="off" />
+            </>
+          ) : (
+            <>
+              <label>6-digit code from your authenticator app</label>
+              <input key="totp" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9 ]*" maxLength={7}
+                value={code} onChange={(e) => setCode(e.target.value)} required autoFocus placeholder="123456" />
+            </>
+          )}
+          <button className="btn btn-primary" type="submit" disabled={busy}>
+            {busy ? 'Checking…' : 'Sign in'}
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setUseRecovery(!useRecovery); setCode(''); setError(''); }}>
+            {useRecovery ? 'Use a code from my app instead' : 'Lost your phone? Use a recovery code'}
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => restart()}>Back</button>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="login-page">
       <form className="login-card" onSubmit={handleSubmit}>
-        <div className="login-brand">
-          <div className="brand-icon brand-icon-light">
-            <span className="brand-icon-letter">D</span>
-            <span className="brand-icon-dot"></span>
-          </div>
-          DYNAMO
-        </div>
+        {brand}
         <h1>Sign in</h1>
         {error && <div className="error-banner">{error}</div>}
         <label>Email</label>
@@ -2478,6 +2704,7 @@ function Login() {
 
 
 function Staff() {
+  const { user: me } = useAuth();
   const [staff, setStaff] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null); // staff object, 'new', or null
@@ -2502,6 +2729,17 @@ function Staff() {
     }
   }
 
+  async function handleMfaReset(e, s) {
+    e.stopPropagation();
+    if (!confirm(`Reset two-factor sign-in for ${s.name}? They'll be signed out and must set it up again (for example on a new phone) when they next sign in.`)) return;
+    try {
+      await api.resetStaffMfa(s.id);
+      load();
+    } catch (err) {
+      alert(err.message || 'Failed to reset two-factor sign-in');
+    }
+  }
+
   return (
     <div>
       <div className="page-header">
@@ -2523,6 +2761,7 @@ function Staff() {
                 <th>Phone</th>
                 <th>Role</th>
                 <th>Status</th>
+                <th>Two-factor</th>
                 <th></th>
               </tr>
             </thead>
@@ -2538,7 +2777,17 @@ function Staff() {
                       {s.active ? 'Active' : 'Inactive'}
                     </span>
                   </td>
+                  <td>
+                    <span className={'badge ' + (s.mfaEnabled ? 'badge-green' : 'badge-grey')}>
+                      {s.mfaEnabled ? 'On' : 'Not set up'}
+                    </span>
+                  </td>
                   <td className="actions-cell">
+                    {s.mfaEnabled && s.id !== me?.id && (s.role !== 'ADMIN' || me?.role === 'ADMIN') && (
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={(e) => handleMfaReset(e, s)}>
+                        Reset 2FA
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn-ghost btn-sm"
@@ -2566,6 +2815,75 @@ function Staff() {
 }
 
 
+
+function TwoFactorSettingsCard() {
+  const [status, setStatus] = useState(null);
+  const [code, setCode] = useState('');
+  const [codes, setCodes] = useState(null);
+  const [settingUp, setSettingUp] = useState(false);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  function load() {
+    api.getMyMfa().then(setStatus).catch(() => {});
+  }
+  useEffect(load, []);
+
+  async function handleRenew(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const res = await api.renewRecoveryCodes(code.replace(/\s/g, ''));
+      setCodes(res.recoveryCodes);
+      setCode('');
+      load();
+    } catch (err) {
+      setError(err.message || 'Could not issue new codes');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!status) return null;
+  return (
+    <div className="card" style={{ maxWidth: 560, marginTop: 20 }}>
+      <div className="settings-section-title">Two-factor sign-in</div>
+      {error && <div className="error-banner">{error}</div>}
+      {codes ? (
+        <RecoveryCodesView codes={codes} onContinue={() => setCodes(null)} continueLabel="Done" />
+      ) : status.enabled ? (
+        <>
+          <p style={{ fontSize: 14 }}>
+            <span className="badge badge-green">On</span>{' '}
+            since {new Date(status.enabledAt).toLocaleDateString('en-GB')}. You have{' '}
+            <strong>{status.recoveryCodesLeft}</strong> unused recovery code{status.recoveryCodesLeft === 1 ? '' : 's'}.
+          </p>
+          <form onSubmit={handleRenew} className="form-grid">
+            <div className="form-field">
+              <label>Get new recovery codes (old ones stop working)</label>
+              <input inputMode="numeric" autoComplete="one-time-code" maxLength={7} value={code}
+                onChange={(e) => setCode(e.target.value)} placeholder="Code from your app" required />
+            </div>
+            <div className="form-field" style={{ justifyContent: 'flex-end' }}>
+              <button type="submit" className="btn btn-primary" disabled={busy || code.replace(/\s/g, '').length !== 6}>
+                {busy ? 'Checking…' : 'Get new codes'}
+              </button>
+            </div>
+          </form>
+          <p className="muted" style={{ fontSize: 13 }}>New phone? Ask an admin to reset your two-factor sign-in on the Staff page, then set it up again at your next sign-in.</p>
+        </>
+      ) : settingUp ? (
+        <MfaSetupPanel onEnabled={(res) => { setSettingUp(false); setCodes(res.recoveryCodes); }} />
+      ) : (
+        <>
+          <p style={{ fontSize: 14 }}>Not set up. Add a code from an authenticator app to your sign-in.</p>
+          <button type="button" className="btn btn-primary" onClick={() => setSettingUp(true)}>Set up two-factor sign-in</button>
+        </>
+      )}
+    </div>
+  );
+}
 
 function Settings() {
   const { user, refreshUser } = useAuth();
@@ -2773,6 +3091,8 @@ function Settings() {
           </div>
         </form>
       </div>
+
+      <TwoFactorSettingsCard />
 
       {isAdmin && (
         <div className="card" style={{ maxWidth: 560, marginTop: 20 }}>

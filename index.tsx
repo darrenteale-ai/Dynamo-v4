@@ -18,6 +18,7 @@ import {
 } from "docx";
 import { imageSize } from "image-size";
 import QRCode from "qrcode";
+import { createHmac, createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import PDFDocument from "pdfkit";
 
 // No built-in fallback: a known default secret would let anyone forge a
@@ -515,6 +516,13 @@ async function ensureSchema() {
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS tokens_valid_after TIMESTAMPTZ`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS anonymised_at TIMESTAMPTZ`;
+  // Two-factor sign-in (authenticator app). Secrets are stored encrypted;
+  // recovery codes only as SHA-256 hashes.
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_pending_secret TEXT`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_recovery_hashes JSONB`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ`;
   // Accounts that were already inactive before this column existed start
   // their retention clock now.
@@ -915,6 +923,22 @@ async function seed() {
     ON CONFLICT (email) DO UPDATE SET role = 'ADMIN'
   `;
   await sql`INSERT INTO app_settings (id, days_to_respond) VALUES (1, 5) ON CONFLICT (id) DO NOTHING`;
+  // Emergency: if the only admin has lost their phone and recovery codes,
+  // set MFA_RESET_EMAIL in Railway to their email and redeploy. Their
+  // two-factor sign-in is cleared (they set it up again at sign-in) and the
+  // reset is logged. Remove the variable afterwards.
+  const resetEmail = String(Bun.env.MFA_RESET_EMAIL || "").trim().toLowerCase();
+  if (resetEmail) {
+    const rows = await sql`
+      UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_enabled_at = NULL, totp_last_step = NULL,
+        mfa_recovery_hashes = NULL, tokens_valid_after = now()
+      WHERE lower(email) = ${resetEmail} AND totp_enabled_at IS NOT NULL RETURNING id
+    `;
+    for (const r of rows as any[]) {
+      await sql`INSERT INTO gdpr_log (action, actor_name, details) VALUES ('MFA_RESET', 'System (MFA_RESET_EMAIL)', ${`Two-factor sign-in reset for staff account #${r.id} via MFA_RESET_EMAIL`})`;
+    }
+    console.log(`MFA_RESET_EMAIL: ${rows.length ? "reset done" : "nothing to reset"} — remove the variable now.`);
+  }
   // Never log credentials (previous versions logged the admin password here).
   console.log(`Seed complete. Admin account: ${SEED_ADMIN_EMAIL}`);
 }
@@ -940,15 +964,248 @@ async function getAuth(req: Request): Promise<any> {
   } catch {
     return null;
   }
+  // A half-way sign-in token (password checked, code not yet) is never a session.
+  if (payload.purpose) return null;
   const [user] = await sql`
-    SELECT id, name, email, role, active, tokens_valid_after FROM users WHERE id = ${payload.sub}
+    SELECT id, name, email, role, active, tokens_valid_after, totp_enabled_at FROM users WHERE id = ${payload.sub}
   `;
   if (!user || !user.active) return null;
+  // While two-factor sign-in is required, sessions for accounts that haven't
+  // set it up stop working; the person signs in again and sets it up.
+  if (MFA_REQUIRED && !user.totp_enabled_at) return null;
   if (user.tokens_valid_after && payload.iat && payload.iat * 1000 < new Date(user.tokens_valid_after).getTime() - 1000) {
     return null;
   }
   // Use current DB values, not the (possibly stale) values baked into the token.
   return { ...payload, sub: user.id, name: user.name, email: user.email, role: user.role };
+}
+
+// =====================================================================
+// Two-factor sign-in (GDPR Art. 32): a 6-digit code from an authenticator
+// app (TOTP, RFC 6238: SHA-1, 30 s, 6 digits) after the password, or a
+// one-off recovery code. Required for every account unless the Railway
+// variable MFA_REQUIRED is set to "0" (emergency switch).
+// =====================================================================
+const MFA_REQUIRED = Bun.env.MFA_REQUIRED !== "0";
+const MFA_ISSUER = "Dynamo";
+// Encryption key for stored authenticator secrets. MFA_ENCRYPTION_KEY should
+// be set and never changed (changing it means everyone sets up again).
+const MFA_KEY = createHash("sha256").update("dynamo-mfa-v1:" + (Bun.env.MFA_ENCRYPTION_KEY || JWT_SECRET)).digest();
+if (!Bun.env.MFA_ENCRYPTION_KEY) console.log("WARNING: MFA_ENCRYPTION_KEY is not set; authenticator secrets are encrypted with a key derived from JWT_SECRET.");
+const MFA_WINDOW_MS = 15 * 60 * 1000;
+const MFA_MAX_FAILS = 5;
+const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function base32Encode(buf: Uint8Array): string {
+  let bits = 0, value = 0, out = "";
+  for (const byte of buf) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) { out += B32[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += B32[(value << (5 - bits)) & 31];
+  return out;
+}
+function base32Decode(str: string): Buffer {
+  const clean = str.toUpperCase().replace(/[^A-Z2-7]/g, "");
+  let bits = 0, value = 0;
+  const out: number[] = [];
+  for (const ch of clean) {
+    value = (value << 5) | B32.indexOf(ch);
+    bits += 5;
+    if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  return Buffer.from(out);
+}
+function encryptSecret(plain: string): string {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", MFA_KEY, iv);
+  const enc = Buffer.concat([c.update(plain, "utf8"), c.final()]);
+  return `v1:${iv.toString("base64")}:${c.getAuthTag().toString("base64")}:${enc.toString("base64")}`;
+}
+function decryptSecret(stored: string): string {
+  const [v, iv, tag, enc] = String(stored).split(":");
+  if (v !== "v1") throw new Error("Unknown secret format");
+  const d = createDecipheriv("aes-256-gcm", MFA_KEY, Buffer.from(iv, "base64"));
+  d.setAuthTag(Buffer.from(tag, "base64"));
+  return Buffer.concat([d.update(Buffer.from(enc, "base64")), d.final()]).toString("utf8");
+}
+function totpAt(secretB32: string, step: number): string {
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(step));
+  const h = createHmac("sha1", base32Decode(secretB32)).update(msg).digest();
+  const off = h[h.length - 1] & 15;
+  return String((h.readUInt32BE(off) & 0x7fffffff) % 1000000).padStart(6, "0");
+}
+// Returns the time step the code matched (allowing one step either side for
+// clock drift), or null. Steps at or before lastStep are refused so a code
+// can't be replayed.
+function verifyTotp(secretB32: string, code: any, lastStep: number | null): number | null {
+  const c = String(code ?? "").replace(/\s/g, "");
+  if (!/^\d{6}$/.test(c)) return null;
+  const now = Math.floor(Date.now() / 30000);
+  for (const d of [-1, 0, 1]) {
+    const step = now + d;
+    if (lastStep !== null && lastStep !== undefined && step <= Number(lastStep)) continue;
+    if (timingSafeEqual(Buffer.from(totpAt(secretB32, step)), Buffer.from(c))) return step;
+  }
+  return null;
+}
+function normaliseRecovery(code: any): string {
+  return String(code ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+function hashRecovery(code: any): string {
+  return createHash("sha256").update("dynamo-recovery:" + normaliseRecovery(code)).digest("hex");
+}
+function newRecoveryCodes(): { codes: string[]; hashes: string[] } {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const codes: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const bytes = randomBytes(10);
+    let c = "";
+    for (let j = 0; j < 10; j++) c += alphabet[bytes[j] % alphabet.length];
+    codes.push(`${c.slice(0, 5)}-${c.slice(5)}`);
+  }
+  return { codes, hashes: codes.map(hashRecovery) };
+}
+function signMfaToken(user: any, stage: "verify" | "setup") {
+  return jwt.sign({ sub: user.id, purpose: "mfa", stage }, JWT_SECRET, { expiresIn: "10m" });
+}
+// Identifies the person part-way through signing in (password checked).
+async function readMfaToken(token: any, stage: "verify" | "setup"): Promise<any> {
+  let payload: any;
+  try {
+    payload = jwt.verify(String(token || ""), JWT_SECRET);
+  } catch {
+    return null;
+  }
+  if (payload.purpose !== "mfa" || payload.stage !== stage) return null;
+  const [user] = await sql`SELECT * FROM users WHERE id = ${payload.sub}`;
+  if (!user || !user.active || !isMgrOrAdmin(user)) return null;
+  if (user.tokens_valid_after && payload.iat * 1000 < new Date(user.tokens_valid_after).getTime() - 1000) return null;
+  return user;
+}
+function sessionResponse(user: any, extra: Record<string, any> = {}) {
+  return json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role }, ...extra });
+}
+function mfaLocked(userId: number) {
+  return recentAttempts(`mfa:${userId}`, MFA_WINDOW_MS).length >= MFA_MAX_FAILS;
+}
+const MFA_LOCKED_MSG = "Too many wrong codes. Please wait 15 minutes and try again.";
+const MFA_EXPIRED_MSG = "Your sign-in has timed out. Please sign in again.";
+
+async function handleMfaRequest(req: Request, path: string, method: string): Promise<Response | null> {
+  if (!path.startsWith("/api/auth/mfa/") && !path.startsWith("/api/me/mfa")) return null;
+
+  // Second step of sign-in: code from the app, or a recovery code.
+  if (path === "/api/auth/mfa/verify" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const user = await readMfaToken(body.mfaToken, "verify");
+    if (!user || !user.totp_secret) return json({ error: MFA_EXPIRED_MSG, restart: true }, 400);
+    if (mfaLocked(user.id)) return json({ error: MFA_LOCKED_MSG }, 429);
+    if (body.recoveryCode) {
+      const hashes: string[] = Array.isArray(user.mfa_recovery_hashes) ? user.mfa_recovery_hashes : [];
+      const h = hashRecovery(body.recoveryCode);
+      if (normaliseRecovery(body.recoveryCode).length === 10 && hashes.includes(h)) {
+        const left = hashes.filter((x) => x !== h);
+        await sql`UPDATE users SET mfa_recovery_hashes = ${JSON.stringify(left)}::text::jsonb WHERE id = ${user.id}`;
+        attemptBuckets.delete(`mfa:${user.id}`);
+        await logGdpr({ sub: user.id, name: user.name }, "MFA_RECOVERY_CODE_USED", `Signed in with a recovery code (${left.length} left)`);
+        return sessionResponse(user, { recoveryCodesLeft: left.length });
+      }
+    } else {
+      const step = verifyTotp(decryptSecret(user.totp_secret), body.code, user.totp_last_step);
+      if (step !== null) {
+        await sql`UPDATE users SET totp_last_step = ${step} WHERE id = ${user.id}`;
+        attemptBuckets.delete(`mfa:${user.id}`);
+        const left = Array.isArray(user.mfa_recovery_hashes) ? user.mfa_recovery_hashes.length : 0;
+        return sessionResponse(user, { recoveryCodesLeft: left });
+      }
+    }
+    recordAttempt(`mfa:${user.id}`);
+    return json({ error: body.recoveryCode ? "That recovery code isn't valid or has already been used." : "That code isn't right. Check the time on your phone and try the newest code." }, 400);
+  }
+
+  // Setting up an authenticator: during sign-in (setup token), or from
+  // Settings when two-factor isn't required yet and isn't set up.
+  async function setupUser(body: any): Promise<any> {
+    if (body.mfaToken) return await readMfaToken(body.mfaToken, "setup");
+    const auth = await getAuth(req);
+    if (!auth) return null;
+    const [u] = await sql`SELECT * FROM users WHERE id = ${auth.sub}`;
+    return u || null;
+  }
+
+  if (path === "/api/auth/mfa/setup" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const user = await setupUser(body);
+    if (!user) return json({ error: MFA_EXPIRED_MSG, restart: true }, 400);
+    if (user.totp_enabled_at) return json({ error: "Two-factor sign-in is already set up. Ask an admin to reset it to move to a new phone." }, 400);
+    const secret = base32Encode(randomBytes(20));
+    await sql`UPDATE users SET totp_pending_secret = ${encryptSecret(secret)} WHERE id = ${user.id}`;
+    const otpauthUrl = `otpauth://totp/${encodeURIComponent(MFA_ISSUER)}:${encodeURIComponent(user.email)}?secret=${secret}&issuer=${encodeURIComponent(MFA_ISSUER)}&algorithm=SHA1&digits=6&period=30`;
+    const qrSvg = await QRCode.toString(otpauthUrl, { type: "svg", errorCorrectionLevel: "M", margin: 1 });
+    return json({ secret: secret.match(/.{1,4}/g)!.join(" "), otpauthUrl, qrSvg });
+  }
+
+  if (path === "/api/auth/mfa/enable" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const user = await setupUser(body);
+    if (!user) return json({ error: MFA_EXPIRED_MSG, restart: true }, 400);
+    if (user.totp_enabled_at) return json({ error: "Two-factor sign-in is already set up." }, 400);
+    if (!user.totp_pending_secret) return json({ error: "Start the set-up again.", restart: true }, 400);
+    if (mfaLocked(user.id)) return json({ error: MFA_LOCKED_MSG }, 429);
+    const secret = decryptSecret(user.totp_pending_secret);
+    const step = verifyTotp(secret, body.code, null);
+    if (step === null) {
+      recordAttempt(`mfa:${user.id}`);
+      return json({ error: "That code isn't right. Check the time on your phone and try the newest code." }, 400);
+    }
+    attemptBuckets.delete(`mfa:${user.id}`);
+    const { codes, hashes } = newRecoveryCodes();
+    await sql`
+      UPDATE users SET totp_secret = ${encryptSecret(secret)}, totp_pending_secret = NULL, totp_enabled_at = now(),
+        totp_last_step = ${step}, mfa_recovery_hashes = ${JSON.stringify(hashes)}::text::jsonb
+      WHERE id = ${user.id}
+    `;
+    await logGdpr({ sub: user.id, name: user.name }, "MFA_ENABLED", `Two-factor sign-in set up for staff account #${user.id}`);
+    if (body.mfaToken) return sessionResponse(user, { recoveryCodes: codes });
+    return json({ recoveryCodes: codes });
+  }
+
+  // Status and new recovery codes (signed in).
+  if (path === "/api/me/mfa" && method === "GET") {
+    const auth = await getAuth(req);
+    if (!auth) return json({ error: "Unauthorized" }, 401);
+    const [u] = await sql`SELECT totp_enabled_at, mfa_recovery_hashes FROM users WHERE id = ${auth.sub}`;
+    return json({
+      required: MFA_REQUIRED,
+      enabled: !!u?.totp_enabled_at,
+      enabledAt: u?.totp_enabled_at ?? null,
+      recoveryCodesLeft: Array.isArray(u?.mfa_recovery_hashes) ? u.mfa_recovery_hashes.length : 0,
+    });
+  }
+
+  if (path === "/api/me/mfa/recovery-codes" && method === "POST") {
+    const auth = await getAuth(req);
+    if (!auth) return json({ error: "Unauthorized" }, 401);
+    const body = await req.json().catch(() => ({}));
+    const [u] = await sql`SELECT * FROM users WHERE id = ${auth.sub}`;
+    if (!u?.totp_secret) return json({ error: "Two-factor sign-in isn't set up." }, 400);
+    if (mfaLocked(u.id)) return json({ error: MFA_LOCKED_MSG }, 429);
+    const step = verifyTotp(decryptSecret(u.totp_secret), body.code, u.totp_last_step);
+    if (step === null) {
+      recordAttempt(`mfa:${u.id}`);
+      return json({ error: "That code isn't right. Enter the current code from your authenticator app." }, 400);
+    }
+    attemptBuckets.delete(`mfa:${u.id}`);
+    const { codes, hashes } = newRecoveryCodes();
+    await sql`UPDATE users SET mfa_recovery_hashes = ${JSON.stringify(hashes)}::text::jsonb, totp_last_step = ${step} WHERE id = ${u.id}`;
+    await logGdpr(auth, "MFA_RECOVERY_CODES_RENEWED", `New recovery codes issued for staff account #${u.id}`);
+    return json({ recoveryCodes: codes });
+  }
+
+  return json({ error: "Not found" }, 404);
 }
 
 // ---- Login / public-form throttling (in-memory; resets on restart) ----
@@ -2262,6 +2519,7 @@ function serializeStaff(row: any) {
     phone: row.phone,
     role: row.role,
     active: row.active,
+    mfaEnabled: row.totp_enabled_at !== undefined ? !!row.totp_enabled_at : undefined,
   };
 }
 
@@ -2366,7 +2624,7 @@ async function renderPrivacyPage() {
 </ul>
 
 <h2>Keeping it secure</h2>
-<p>Dynamo is only available to named managers and administrators, over encrypted connections, with role-based access, sign-in throttling and an audit trail of who viewed, changed or exported each record.</p>
+<p>Dynamo is only available to named managers and administrators, over encrypted connections, with role-based access, two-factor sign-in, sign-in throttling and an audit trail of who viewed, changed or exported each record.</p>
 
 <h2>Your rights</h2>
 <p>You can ask for a copy of the personal information we hold about you, ask us to correct it, ask us to delete it or restrict how we use it, and object to how we use it. Some rights are limited where we must keep records by law (for example, we may anonymise rather than delete an incident record). We will respond within one month. To make a request, use the contact details above.</p>
@@ -2394,6 +2652,9 @@ const GDPR_ADMIN_PAGE = `<!doctype html><html lang="en-GB"><head><meta charset="
   <p>Sign in with your Dynamo admin account.</p>
   <label>Email</label><input id="em" type="email" autocomplete="username"/>
   <label>Password</label><input id="pw" type="password" autocomplete="current-password"/>
+  <div id="codeBox" hidden>
+    <label>6-digit code from your authenticator app (or a recovery code)</label><input id="code" autocomplete="one-time-code"/>
+  </div>
   <button id="loginBtn">Sign in</button> <span id="loginMsg" class="muted"></span>
 </div>
 
@@ -2463,11 +2724,31 @@ async function api(path, opts = {}) {
 }
 function signOut() { token = null; $("app").hidden = true; $("login").hidden = false; }
 $("logout").onclick = signOut;
+let mfaToken = null;
 $("loginBtn").onclick = async () => {
   $("loginMsg").textContent = "";
-  const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: $("em").value, password: $("pw").value }) });
-  const data = await res.json();
-  if (!res.ok) return ($("loginMsg").textContent = data.error || "Sign-in failed");
+  let res, data;
+  if (mfaToken) {
+    // Second step: a 6-digit app code, or a recovery code (XXXXX-XXXXX).
+    const c = $("code").value.trim();
+    const body = /^[0-9 ]{6,7}$/.test(c) ? { mfaToken, code: c.replace(/ /g, "") } : { mfaToken, recoveryCode: c };
+    res = await fetch("/api/auth/mfa/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    data = await res.json();
+    if (!res.ok) {
+      if (data.restart) { mfaToken = null; $("codeBox").hidden = true; $("pw").value = ""; }
+      return ($("loginMsg").textContent = data.error || "Sign-in failed");
+    }
+  } else {
+    res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: $("em").value, password: $("pw").value }) });
+    data = await res.json();
+    if (!res.ok) return ($("loginMsg").textContent = data.error || "Sign-in failed");
+    if (data.mfaSetupRequired) return ($("loginMsg").textContent = "Set up two-factor sign-in in the main Dynamo app first, then come back.");
+    if (data.mfaRequired) {
+      mfaToken = data.mfaToken; $("codeBox").hidden = false; $("code").value = ""; $("code").focus();
+      return ($("loginMsg").textContent = "Enter your code.");
+    }
+  }
+  mfaToken = null; $("codeBox").hidden = true; $("code").value = "";
   if (data.user.role !== "ADMIN") return ($("loginMsg").textContent = "These tools are for admins only.");
   token = data.token; $("pw").value = "";
   $("login").hidden = true; $("app").hidden = false;
@@ -2861,6 +3142,7 @@ async function anonymiseSubject(
     await sql`
       UPDATE users SET name = ${label}, email = ${`anonymised-${userId}@invalid.local`}, phone = NULL,
         password_hash = ${randomHash}, active = FALSE, anonymised_at = now(), tokens_valid_after = now(),
+        totp_secret = NULL, totp_pending_secret = NULL, totp_enabled_at = NULL, totp_last_step = NULL, mfa_recovery_hashes = NULL,
         deactivated_at = COALESCE(deactivated_at, now())
       WHERE id = ${userId}
     `;
@@ -4987,9 +5269,14 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
       attemptBuckets.delete(userKey);
       // This site is restricted to managers and admins.
       if (!isMgrOrAdmin(user)) return json({ error: "Access to this site is restricted to managers." }, 403);
-      const token = signToken(user);
-      return json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+      // Password is right; now the second step.
+      if (user.totp_enabled_at) return json({ mfaRequired: true, mfaToken: signMfaToken(user, "verify") });
+      if (MFA_REQUIRED) return json({ mfaSetupRequired: true, mfaToken: signMfaToken(user, "setup") });
+      return sessionResponse(user);
     }
+
+    const mfaResponse = await handleMfaRequest(req, path, method);
+    if (mfaResponse) return mfaResponse;
 
     if (path === "/api/auth/me" && method === "GET") {
       const auth = await getAuth(req);
@@ -5031,7 +5318,7 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (path === "/api/staff" && method === "GET") {
       const auth = await getAuth(req);
       if (!auth) return json({ error: "Unauthorized" }, 401);
-      const rows = await sql`SELECT id, name, email, phone, role, active FROM users ORDER BY name`;
+      const rows = await sql`SELECT id, name, email, phone, role, active, totp_enabled_at FROM users ORDER BY name`;
       return json(rows.map(serializeStaff));
     }
 
@@ -5096,6 +5383,28 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         results.push({ id: row.id, name: row.name, email: row.email, tempPassword });
       }
       return json({ results });
+    }
+
+    // Admin / manager resets someone's two-factor sign-in (lost phone). They
+    // set it up again at their next sign-in. Same rules as password resets:
+    // only an admin can reset an admin, and nobody can reset their own.
+    const mfaResetMatch = path.match(/^\/api\/staff\/(\d+)\/mfa-reset$/);
+    if (mfaResetMatch && method === "POST") {
+      const auth = await getAuth(req);
+      if (!auth) return json({ error: "Unauthorized" }, 401);
+      if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+      const id = Number(mfaResetMatch[1]);
+      if (id === auth.sub) return json({ error: "You can't reset your own two-factor sign-in. Ask another admin, or use a recovery code." }, 400);
+      const [target] = await sql`SELECT id, role FROM users WHERE id = ${id}`;
+      if (!target) return json({ error: "Not found" }, 404);
+      if (target.role === "ADMIN" && !isAdmin(auth)) return json({ error: "Only an admin can reset an admin's two-factor sign-in." }, 403);
+      await sql`
+        UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_enabled_at = NULL, totp_last_step = NULL,
+          mfa_recovery_hashes = NULL, tokens_valid_after = now()
+        WHERE id = ${id}
+      `;
+      await logGdpr(auth, "MFA_RESET", `Two-factor sign-in reset for staff account #${id}`);
+      return json({ ok: true });
     }
 
     const staffIdMatch = path.match(/^\/api\/staff\/(\d+)$/);
