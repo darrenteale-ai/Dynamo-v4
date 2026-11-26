@@ -49,13 +49,13 @@ hr { display:none; }
 <body>
 <header><div class="wrap"><div class="logo">D</div><div>
 <h1>Dynamo User Guide</h1>
-<p>Incident reporting, medication, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.1, 26 November 2026</p>
+<p>Incident reporting, medication, Datix, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.2, 26 November 2026</p>
 </div><a class="back" href="/settings">← Back to Dynamo</a></div></header>
 <div class="layout">
 <nav aria-label="Contents"><div class="label">Contents</div><a href="#sec-1-introduction">1. Introduction</a><a href="#sec-2-reporting-an-incident-crew-qr-form">2. Reporting an incident (crew — QR form)</a><a href="#sec-3-reporting-an-incident-managers-inside-dynamo">3. Reporting an incident (managers — inside Dynamo)</a><a href="#sec-4-managing-incidents">4. Managing incidents</a><a href="#sec-5-harm-and-duty-of-candour">5. Harm and duty of candour</a><a href="#sec-6-riddor-and-cqc-reporting">6. RIDDOR and CQC reporting</a><a href="#sec-7-investigating-and-closing-an-incident">7. Investigating and closing an incident</a><a href="#sec-8-photos-actions-alerts-audit-trail-and-exports">8. Photos, actions, alerts, audit trail and exports</a><a href="#sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes, medication, Datix and fleet</a><a href="#sec-10-admin-tasks">10. Admin tasks</a><a href="#sec-11-quick-reference">11. Quick reference</a></nav>
 <main>
 <h2 id="sec-1-introduction">1. Introduction</h2>
-<p>Dynamo is where we record, investigate and learn from incidents, near misses, complaints and safety concerns. It also keeps track of our legal reporting duties (duty of candour, RIDDOR and CQC notifications) runs vehicle daily checks, and tracks drug bags and medication stock.</p>
+<p>Dynamo is where we record, investigate and learn from incidents, near misses, complaints and safety concerns. It also keeps track of our legal reporting duties (duty of candour, RIDDOR and CQC notifications), runs vehicle daily checks, tracks drug bags and medication stock, and stores documents we receive from NHS trusts' Datix systems.</p>
 <p>There are two ways people use Dynamo:</p>
 <div class="tbl"><table>
 <thead>
@@ -73,7 +73,7 @@ hr { display:none; }
 </tr>
 <tr>
 <td><strong>Managers and admins</strong></td>
-<td>Sign in to Dynamo to review, investigate and close incidents, and run fleet, staff and settings</td>
+<td>Sign in to Dynamo to review, investigate and close incidents, manage medication and Datix documents, and run fleet, staff and settings</td>
 <td>Yes</td>
 </tr>
 </tbody>
@@ -448,20 +448,10 @@ hr { display:none; }
 <li>The <strong>Stock movements</strong> tab lists every receipt, issue, disposal and count, with the balance after each one and who did it.</li>
 </ul>
 <p>The weekly summary email includes medicines below minimum and expired batches. The medication store is for stock control only; it is not a controlled drugs register.</p>
-<h3 id="sec-datix-documents">Datix documents</h3>
-<p>The <strong>Datix Documents</strong> page (under <strong>Datix</strong> in the sidebar) is where managers and admins keep documents received from NHS trusts' Datix systems, such as incident reports, feedback and requests for information about our crews.</p>
-<ol>
-<li><strong>Drag and drop</strong> one or more files onto the box at the top, or click the box to choose files. PDF, Word, Excel, Outlook and other emails (.msg / .eml), text, images and zip files are accepted, up to 25 MB each.</li>
-<li>Optionally enter the <strong>Datix reference</strong>, choose the <strong>NHS trust</strong> from the list (or pick <strong>+ Add a new NHS trust…</strong> at the bottom to add one there and then), the <strong>Dynamo incident</strong> it relates to (start typing the reference and pick it from the list) and a short note. These details are added to every file in that upload.</li>
-<li>Click <strong>Upload</strong>. Each file shows Uploaded when it's done; if one fails, the reason is shown next to it and you can remove it or try again.</li>
-</ol>
-<p>Underneath, every document is listed newest first. Use the search box to find documents by file name, Datix reference, trust (full or short name), notes or incident reference. Use the trust dropdown to show one trust's documents (or those with no trust recorded), and tick <strong>Not linked to an incident</strong> to see documents still to be linked. For each document you can:</p>
-<ul>
-<li><strong>Open</strong> it (it downloads or opens in a new tab);</li>
-<li><strong>Edit</strong> the file name, Datix reference, trust, linked incident and notes;</li>
-<li>see its <strong>History</strong>: who uploaded, opened and edited it, and when;</li>
-<li><strong>Delete</strong> it (admins only). This removes the file permanently.</li>
-</ul>
+<h3 id="sec-datix-documents">Datix</h3>
+<p>The <strong>Datix</strong> section of the sidebar is where managers and admins keep documents received from NHS trusts' Datix systems, such as incident reports, feedback and requests for information about our crews.</p>
+<p>It has two pages: the <strong>Datix Dashboard</strong> (an overview and the list of NHS trusts) and <strong>Datix Documents</strong> (where you upload and find the documents).</p>
+<p><strong>Getting started:</strong> first add the NHS trusts you work with (see <em>NHS trusts</em> below), then upload documents and choose the trust for each. You can also add a trust while uploading.</p>
 <h4>Datix dashboard</h4>
 <p>The <strong>Datix Dashboard</strong> shows:</p>
 <ul>
@@ -476,6 +466,20 @@ hr { display:none; }
 <li>Click <strong>Edit</strong> to change a trust's details. Renaming a trust updates all its documents.</li>
 <li>To stop using a trust, edit it and set the status to <strong>Archived</strong>. It disappears from the dropdowns for new uploads but its documents keep it. Tick <strong>Show archived</strong> to see archived trusts and make one active again.</li>
 <li>Each trust can only be on the list once.</li>
+</ul>
+<h4>Uploading and finding documents</h4>
+<p>On the <strong>Datix Documents</strong> page (or click <strong>Upload documents</strong> on the dashboard):</p>
+<ol>
+<li><strong>Drag and drop</strong> one or more files onto the box at the top, or click the box to choose files. PDF, Word, Excel, Outlook and other emails (.msg / .eml), text, images and zip files are accepted, up to 25 MB each.</li>
+<li>Optionally enter the <strong>Datix reference</strong>, choose the <strong>NHS trust</strong> from the list (or pick <strong>+ Add a new NHS trust…</strong> at the bottom to add one there and then), the <strong>Dynamo incident</strong> it relates to (start typing the reference and pick it from the list) and a short note. These details are added to every file in that upload.</li>
+<li>Click <strong>Upload</strong>. Each file shows Uploaded when it's done; if one fails, the reason is shown next to it and you can remove it or try again.</li>
+</ol>
+<p>Underneath, every document is listed newest first. Use the search box to find documents by file name, Datix reference, trust (full or short name), notes or incident reference. Use the trust dropdown to show one trust's documents (or those with no trust recorded), and tick <strong>Not linked to an incident</strong> to see documents still to be linked. For each document you can:</p>
+<ul>
+<li><strong>Open</strong> it (it downloads or opens in a new tab);</li>
+<li><strong>Edit</strong> the file name, Datix reference, trust, linked incident and notes;</li>
+<li>see its <strong>History</strong>: who uploaded, opened and edited it, and when;</li>
+<li><strong>Delete</strong> it (admins only). This removes the file permanently.</li>
 </ul>
 <p>These documents often contain patient information. Only open them when you need to, don't download copies you don't need, and never forward them outside the company. Datix documents are included in the data protection tools (section 10).</p>
 <h3 id="sec-fleet-management">Fleet management</h3>
@@ -644,7 +648,13 @@ The harm level is moderate or worse. Decide whether it's a notifiable safety inc
 <p><strong>Who can see that I opened an incident?</strong>
 Anyone who can open the incident can see the audit trail, including the <em>Opened by</em> list.</p>
 <p><strong>A crew member reported something serious through the QR form but it shows as LOW.</strong>
-QR reports always start as LOW. Review it, set the severity and harm level, and allocate a manager.</p><a class="top" href="#sec-1-introduction">Back to top ↑</a></main>
+QR reports always start as LOW. Review it, set the severity and harm level, and allocate a manager.</p>
+<p><strong>An NHS trust has sent us a Datix report. Where does it go?</strong>
+Go to Datix → <strong>Datix Documents</strong> and drag the file (or the email saved as .msg or .eml) onto the box. Choose the trust, add the Datix reference, and link it to the Dynamo incident if there is one.</p>
+<p><strong>The trust I need isn't in the dropdown.</strong>
+Pick <strong>+ Add a new NHS trust…</strong> at the bottom of the dropdown, or add it from the NHS trusts list on the Datix Dashboard. If it's there but archived, tick <strong>Show archived</strong> on the dashboard, edit it and set it back to Active.</p>
+<p><strong>I uploaded a Datix document by mistake.</strong>
+Ask an admin to delete it (only admins can). If you just chose the wrong trust or incident, click <strong>Edit</strong> and correct it.</p><a class="top" href="#sec-1-introduction">Back to top ↑</a></main>
 </div>
 <script>
 (function(){
