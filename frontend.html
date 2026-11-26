@@ -495,7 +495,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate, NavLink, useNavigate, useParams, useLocation } from 'react-router-dom';
 
-const { useState, useEffect, useContext, createContext, useMemo, StrictMode } = React;
+const { useState, useEffect, useContext, createContext, useMemo, useRef, StrictMode } = React;
 
 const TOKEN_KEY = 'dynamo_token';
 
@@ -563,6 +563,12 @@ const api = {
   resetStaffPasswords: (userIds) => request('/staff/reset-password', { method: 'POST', body: { userIds } }),
   getStaffProfile: (id) => request(`/staff/${id}`),
   listIncidents: () => request('/incidents'),
+  listDatix: (q) => request('/datix', { params: { q } }),
+  uploadDatix: (formData) => uploadRequest('/datix', formData),
+  updateDatix: (id, data) => request(`/datix/${id}`, { method: 'PUT', body: data }),
+  deleteDatix: (id) => request(`/datix/${id}`, { method: 'DELETE' }),
+  getDatixDownloadUrl: (id) => request(`/datix/${id}/download`),
+  getDatixHistory: (id) => request(`/datix/${id}/history`),
   // Opening an incident needs a reason (recorded in the audit trail) unless
   // you're its assigned investigator; getIncident refreshes an open incident.
   openIncident: (id, reason) => request(`/incidents/${id}/open`, { method: 'POST', body: { reason } }),
@@ -788,6 +794,11 @@ function buildNav(isAdmin) {
     ] });
   }
   if (isAdmin) {
+    nav.push({ section: 'DATIX', items: [
+      { to: '/datix', label: 'Datix Documents', icon: '📥' },
+    ] });
+  }
+  if (isAdmin) {
     nav.push({ section: 'FLEET', items: [
       { to: '/fleet', label: 'Fleet Management', icon: '🚑' },
     ] });
@@ -807,6 +818,7 @@ function Layout({ children }) {
   const NAV = buildNav(isMgrOrAdmin(user?.role));
   const location = useLocation();
   const pageTitle = location.pathname.startsWith('/fleet') ? 'Fleet Management'
+    : location.pathname.startsWith('/datix') ? 'Datix'
     : location.pathname.startsWith('/medication-store') ? 'Medication Store'
     : location.pathname.startsWith('/medication-dashboard') ? 'Medication Dashboard'
     : location.pathname.startsWith('/medication') ? 'Medication' : 'Incident Reporting';
@@ -2701,6 +2713,381 @@ function Login() {
   );
 }
 
+
+
+// ---- Datix: drag-and-drop store for documents from NHS trusts' Datix ----
+
+const DATIX_ACCEPT = '.pdf,.doc,.docx,.rtf,.odt,.txt,.csv,.xls,.xlsx,.ods,.msg,.eml,.htm,.html,.jpg,.jpeg,.png,.gif,.webp,.heic,.tif,.tiff,.zip';
+const DATIX_MAX_MB = 25;
+
+function fmtFileSize(n) {
+  if (!n && n !== 0) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function datixFileIcon(name) {
+  const ext = (String(name).match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase();
+  if (ext === 'pdf') return '📕';
+  if (['doc', 'docx', 'rtf', 'odt', 'txt'].includes(ext)) return '📄';
+  if (['xls', 'xlsx', 'csv', 'ods'].includes(ext)) return '📊';
+  if (['msg', 'eml'].includes(ext)) return '✉️';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'tif', 'tiff'].includes(ext)) return '🖼️';
+  if (ext === 'zip') return '🗜️';
+  return '📎';
+}
+
+function DatixDocuments() {
+  const { user } = useAuth();
+  const isAdminUser = user?.role === 'ADMIN';
+  const [docs, setDocs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [error, setError] = useState('');
+  const [dragging, setDragging] = useState(false);
+  const [queue, setQueue] = useState([]); // [{ file, status: 'waiting'|'uploading'|'done'|'error', message }]
+  const [datixRef, setDatixRef] = useState('');
+  const [trust, setTrust] = useState('');
+  const [incidentRef, setIncidentRef] = useState('');
+  const [notes, setNotes] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [incidentRefs, setIncidentRefs] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [historyFor, setHistoryFor] = useState(null);
+  const fileInput = useRef(null);
+  const dragDepth = useRef(0);
+
+  function load(q = search) {
+    setLoading(true);
+    return api.listDatix(q).then(setDocs).catch((err) => setError(err.message || 'Could not load documents')).finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    load('');
+    api.listIncidents().then((rows) => setIncidentRefs(rows.map((r) => r.ref))).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => load(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  function addFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setError('');
+    setQueue((prev) => [
+      ...prev.filter((q) => q.status !== 'done'),
+      ...files.map((file) => ({
+        file,
+        status: file.size > DATIX_MAX_MB * 1024 * 1024 ? 'error' : 'waiting',
+        message: file.size > DATIX_MAX_MB * 1024 * 1024 ? `Too large (${DATIX_MAX_MB} MB max)` : '',
+      })),
+    ]);
+  }
+
+  function onDragEnter(e) { e.preventDefault(); dragDepth.current++; setDragging(true); }
+  function onDragLeave(e) { e.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }
+  function onDragOver(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+  function onDrop(e) {
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragging(false);
+    addFiles(e.dataTransfer.files);
+  }
+
+  async function uploadAll() {
+    setUploading(true);
+    setError('');
+    const items = [...queue];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].status !== 'waiting') continue;
+      items[i] = { ...items[i], status: 'uploading' };
+      setQueue([...items]);
+      try {
+        const fd = new FormData();
+        fd.append('file', items[i].file);
+        if (datixRef.trim()) fd.append('datixRef', datixRef.trim());
+        if (trust.trim()) fd.append('trust', trust.trim());
+        if (incidentRef.trim()) fd.append('incidentRef', incidentRef.trim());
+        if (notes.trim()) fd.append('notes', notes.trim());
+        await api.uploadDatix(fd);
+        items[i] = { ...items[i], status: 'done', message: '' };
+      } catch (err) {
+        items[i] = { ...items[i], status: 'error', message: err.message || 'Upload failed' };
+      }
+      setQueue([...items]);
+    }
+    setUploading(false);
+    if (items.every((q) => q.status === 'done')) {
+      setDatixRef(''); setTrust(''); setIncidentRef(''); setNotes('');
+      setTimeout(() => setQueue((prev) => prev.filter((q) => q.status !== 'done')), 2500);
+    }
+    load();
+  }
+
+  async function openDoc(d) {
+    try {
+      const { url } = await api.getDatixDownloadUrl(d.id);
+      window.open(url, '_blank');
+    } catch (err) {
+      setError(err.message || 'Could not open the document');
+    }
+  }
+
+  async function removeDoc(d) {
+    if (!confirm(`Delete "${d.fileName}"? The file is removed permanently.`)) return;
+    try {
+      await api.deleteDatix(d.id);
+      load();
+    } catch (err) {
+      setError(err.message || 'Could not delete the document');
+    }
+  }
+
+  const waiting = queue.filter((q) => q.status === 'waiting').length;
+
+  return (
+    <div>
+      <div className="page-header">
+        <h1>Datix Documents</h1>
+      </div>
+      <p className="muted" style={{ marginTop: -8 }}>
+        Store documents you receive from NHS trusts' Datix systems — incident reports, feedback and requests for information.
+        They may contain patient information: only managers and admins can see them, and every upload and download is recorded.
+      </p>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div
+          className={'dropzone' + (dragging ? ' dropzone-active' : '')}
+          style={{ padding: 36 }}
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
+          onClick={() => fileInput.current?.click()}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.current?.click(); } }}
+        >
+          <div className="dropzone-icon">📥</div>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>{dragging ? 'Drop the files here' : 'Drag and drop Datix files here'}</div>
+          <div>or click to choose files · PDF, Word, Excel, emails (.msg / .eml), images or zip · up to {DATIX_MAX_MB} MB each</div>
+          <input ref={fileInput} type="file" multiple accept={DATIX_ACCEPT} style={{ display: 'none' }}
+            onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }} />
+        </div>
+
+        {queue.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <table className="table">
+              <tbody>
+                {queue.map((q, i) => (
+                  <tr key={i}>
+                    <td style={{ width: 28 }}>{datixFileIcon(q.file.name)}</td>
+                    <td>{q.file.name}</td>
+                    <td style={{ width: 90 }}>{fmtFileSize(q.file.size)}</td>
+                    <td style={{ width: 220 }}>
+                      {q.status === 'waiting' && <span className="badge badge-grey">Ready</span>}
+                      {q.status === 'uploading' && <span className="badge">Uploading…</span>}
+                      {q.status === 'done' && <span className="badge badge-green">Uploaded</span>}
+                      {q.status === 'error' && <span className="badge badge-red" title={q.message}>{q.message || 'Failed'}</span>}
+                    </td>
+                    <td style={{ width: 40 }}>
+                      {(q.status === 'waiting' || q.status === 'error') && !uploading && (
+                        <span className="dropzone-file-remove" title="Remove" onClick={() => setQueue(queue.filter((_, j) => j !== i))}>✕</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="form-grid" style={{ marginTop: 12 }}>
+              <div className="form-field">
+                <label>Datix reference (optional)</label>
+                <input value={datixRef} onChange={(e) => setDatixRef(e.target.value)} placeholder="e.g. W123456" />
+              </div>
+              <div className="form-field">
+                <label>NHS trust (optional)</label>
+                <input value={trust} onChange={(e) => setTrust(e.target.value)} placeholder="e.g. Leeds Teaching Hospitals" />
+              </div>
+              <div className="form-field">
+                <label>Link to Dynamo incident (optional)</label>
+                <input list="datix-incident-refs" value={incidentRef} onChange={(e) => setIncidentRef(e.target.value)} placeholder="e.g. 26/11/2026 - 0002" />
+                <datalist id="datix-incident-refs">{incidentRefs.map((r) => <option key={r} value={r} />)}</datalist>
+              </div>
+              <div className="form-field">
+                <label>Notes (optional)</label>
+                <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What it's about" />
+              </div>
+            </div>
+            <p className="muted" style={{ fontSize: 12, margin: '4px 0 10px' }}>These details are added to every file in this upload. You can change them for each file afterwards.</p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" className="btn btn-ghost" disabled={uploading} onClick={() => setQueue([])}>Clear</button>
+              <button type="button" className="btn btn-primary" disabled={uploading || waiting === 0} onClick={uploadAll}>
+                {uploading ? 'Uploading…' : `Upload ${waiting} file${waiting === 1 ? '' : 's'}`}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="card table-card">
+        <div style={{ padding: '12px 16px', display: 'flex', gap: 12, alignItems: 'center' }}>
+          <input style={{ flex: 1, maxWidth: 420 }} value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by file name, Datix ref, trust, notes or incident ref" />
+          <span className="muted" style={{ fontSize: 13 }}>{docs.length} document{docs.length === 1 ? '' : 's'}</span>
+        </div>
+        {loading && docs.length === 0 ? (
+          <div className="empty">Loading…</div>
+        ) : docs.length === 0 ? (
+          <div className="empty">{search ? 'No documents match your search.' : 'No Datix documents yet. Drag files into the box above.'}</div>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Datix ref</th>
+                <th>Trust</th>
+                <th>Incident</th>
+                <th>Uploaded</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {docs.map((d) => (
+                <tr key={d.id}>
+                  <td>
+                    <a href="#" onClick={(e) => { e.preventDefault(); openDoc(d); }}>{datixFileIcon(d.fileName)} {d.fileName}</a>
+                    <div className="muted" style={{ fontSize: 12 }}>{fmtFileSize(d.fileSize)}{d.notes ? ' · ' + d.notes : ''}</div>
+                  </td>
+                  <td>{d.datixRef || '—'}</td>
+                  <td>{d.trust || '—'}</td>
+                  <td>{d.incidentRef || '—'}</td>
+                  <td>
+                    {new Date(d.uploadedAt).toLocaleDateString('en-GB')}
+                    <div className="muted" style={{ fontSize: 12 }}>{d.uploadedByName || ''}</div>
+                  </td>
+                  <td className="actions-cell" style={{ whiteSpace: 'nowrap' }}>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => openDoc(d)}>Open</button>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditing(d)}>Edit</button>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setHistoryFor(d)}>History</button>
+                    {isAdminUser && <button type="button" className="btn btn-ghost btn-sm" onClick={() => removeDoc(d)}>Delete</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {editing && (
+        <DatixEditModal doc={editing} incidentRefs={incidentRefs} onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load(); }} />
+      )}
+      {historyFor && <DatixHistoryModal doc={historyFor} onClose={() => setHistoryFor(null)} />}
+    </div>
+  );
+}
+
+function DatixEditModal({ doc, incidentRefs, onClose, onSaved }) {
+  const [fileName, setFileName] = useState(doc.fileName || '');
+  const [datixRef, setDatixRef] = useState(doc.datixRef || '');
+  const [trust, setTrust] = useState(doc.trust || '');
+  const [incidentRef, setIncidentRef] = useState(doc.incidentRef || '');
+  const [notes, setNotes] = useState(doc.notes || '');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      await api.updateDatix(doc.id, { fileName, datixRef, trust, incidentRef, notes });
+      onSaved();
+    } catch (err) {
+      setError(err.message || 'Could not save');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={handleSubmit}>
+        <div className="modal-header">
+          <h2>Edit Datix document</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field form-field-wide">
+            <label>File name</label>
+            <input value={fileName} onChange={(e) => setFileName(e.target.value)} required />
+          </div>
+          <div className="form-field">
+            <label>Datix reference</label>
+            <input value={datixRef} onChange={(e) => setDatixRef(e.target.value)} />
+          </div>
+          <div className="form-field">
+            <label>NHS trust</label>
+            <input value={trust} onChange={(e) => setTrust(e.target.value)} />
+          </div>
+          <div className="form-field form-field-wide">
+            <label>Linked Dynamo incident</label>
+            <input list="datix-edit-incident-refs" value={incidentRef} onChange={(e) => setIncidentRef(e.target.value)} placeholder="Leave blank for none" />
+            <datalist id="datix-edit-incident-refs">{incidentRefs.map((r) => <option key={r} value={r} />)}</datalist>
+          </div>
+          <div className="form-field form-field-wide">
+            <label>Notes</label>
+            <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function DatixHistoryModal({ doc, onClose }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => { api.getDatixHistory(doc.id).then(setRows).catch(() => setRows([])); }, []);
+  const label = { UPLOADED: 'Uploaded', OPENED: 'Opened', EDITED: 'Edited' };
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>History — {doc.fileName}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {!rows ? <div className="empty">Loading…</div> : rows.length === 0 ? <div className="empty">No history.</div> : (
+          <table className="table">
+            <thead><tr><th>When</th><th>What</th><th>Who</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td>{new Date(r.createdAt).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                  <td>{label[r.action] || r.action}</td>
+                  <td>{r.actorName || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
 
 
 function Staff() {
@@ -7589,6 +7976,7 @@ function AppRoutes() {
                 <Route path="/medication-dashboard" element={<AdminRoute><MedicationDashboard /></AdminRoute>} />
                 <Route path="/staff" element={<AdminRoute><Staff /></AdminRoute>} />
                 <Route path="/case-notes" element={<AdminRoute><CaseNotes /></AdminRoute>} />
+                <Route path="/datix" element={<AdminRoute><DatixDocuments /></AdminRoute>} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="*" element={<Navigate to="/dashboard" replace />} />
               </Routes>

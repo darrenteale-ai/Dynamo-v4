@@ -51,7 +51,7 @@ hr { display:none; }
 <p>Incident reporting, medication, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.1, 26 November 2026</p>
 </div><a class="back" href="/settings">← Back to Dynamo</a></div></header>
 <div class="layout">
-<nav aria-label="Contents"><div class="label">Contents</div><a href="#sec-1-introduction">1. Introduction</a><a href="#sec-2-reporting-an-incident-crew-qr-form">2. Reporting an incident (crew — QR form)</a><a href="#sec-3-reporting-an-incident-managers-inside-dynamo">3. Reporting an incident (managers — inside Dynamo)</a><a href="#sec-4-managing-incidents">4. Managing incidents</a><a href="#sec-5-harm-and-duty-of-candour">5. Harm and duty of candour</a><a href="#sec-6-riddor-and-cqc-reporting">6. RIDDOR and CQC reporting</a><a href="#sec-7-investigating-and-closing-an-incident">7. Investigating and closing an incident</a><a href="#sec-8-photos-actions-alerts-audit-trail-and-exports">8. Photos, actions, alerts, audit trail and exports</a><a href="#sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes and fleet</a><a href="#sec-10-admin-tasks">10. Admin tasks</a><a href="#sec-11-quick-reference">11. Quick reference</a></nav>
+<nav aria-label="Contents"><div class="label">Contents</div><a href="#sec-1-introduction">1. Introduction</a><a href="#sec-2-reporting-an-incident-crew-qr-form">2. Reporting an incident (crew — QR form)</a><a href="#sec-3-reporting-an-incident-managers-inside-dynamo">3. Reporting an incident (managers — inside Dynamo)</a><a href="#sec-4-managing-incidents">4. Managing incidents</a><a href="#sec-5-harm-and-duty-of-candour">5. Harm and duty of candour</a><a href="#sec-6-riddor-and-cqc-reporting">6. RIDDOR and CQC reporting</a><a href="#sec-7-investigating-and-closing-an-incident">7. Investigating and closing an incident</a><a href="#sec-8-photos-actions-alerts-audit-trail-and-exports">8. Photos, actions, alerts, audit trail and exports</a><a href="#sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes, medication, Datix and fleet</a><a href="#sec-10-admin-tasks">10. Admin tasks</a><a href="#sec-11-quick-reference">11. Quick reference</a></nav>
 <main>
 <h2 id="sec-1-introduction">1. Introduction</h2>
 <p>Dynamo is where we record, investigate and learn from incidents, near misses, complaints and safety concerns. It also keeps track of our legal reporting duties (duty of candour, RIDDOR and CQC notifications) runs vehicle daily checks, and tracks drug bags and medication stock.</p>
@@ -106,6 +106,7 @@ hr { display:none; }
 <li><strong>Medication Dashboard</strong> (under Medication) — drug bags and stock at a glance, with action lists and charts.</li>
 <li><strong>Drug Bag Sign In / Sign Out</strong> (under Medication) — sign drug bags out to crews, sign them back in, restock and reseal.</li>
 <li><strong>Medication Store</strong> (under Medication) — stock in hand, expiry dates by batch and minimum quantities.</li>
+<li><strong>Datix Documents</strong> (under Datix) — drag and drop documents you receive from NHS trusts' Datix systems.</li>
 <li><strong>Fleet Management</strong> — vehicles, key dates, daily checks and defects.</li>
 <li><strong>Staff</strong> — manager and admin accounts.</li>
 <li><strong>Case Notes</strong> — running notes on ongoing matters.</li>
@@ -411,7 +412,7 @@ hr { display:none; }
 <li><strong>Summary report</strong> — <strong>Incident Reporting → Export summary</strong> downloads a Word summary for a date range, broken down by category, severity, status, vehicle and location, with overdue incidents and RIDDOR/CQC flags.</li>
 </ul>
 <hr />
-<h2 id="sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes and fleet</h2>
+<h2 id="sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes, medication, Datix and fleet</h2>
 <h3 id="sec-dashboard">Dashboard</h3>
 <p>At-a-glance figures: total, open and overdue incidents, this month's count, RIDDOR and CQC flags, overdue actions and unread safety alerts. Charts show incidents per week and by category, severity, status, response status, vehicle and location, plus a list of incidents with regulatory flags or outstanding actions.</p>
 <h3 id="sec-case-notes">Case notes</h3>
@@ -445,6 +446,21 @@ hr { display:none; }
 <li>The <strong>Stock movements</strong> tab lists every receipt, issue, disposal and count, with the balance after each one and who did it.</li>
 </ul>
 <p>The weekly summary email includes medicines below minimum and expired batches. The medication store is for stock control only; it is not a controlled drugs register.</p>
+<h3 id="sec-datix-documents">Datix documents</h3>
+<p>The <strong>Datix Documents</strong> page (under <strong>Datix</strong> in the sidebar) is where managers and admins keep documents received from NHS trusts' Datix systems, such as incident reports, feedback and requests for information about our crews.</p>
+<ol>
+<li><strong>Drag and drop</strong> one or more files onto the box at the top, or click the box to choose files. PDF, Word, Excel, Outlook and other emails (.msg / .eml), text, images and zip files are accepted, up to 25 MB each.</li>
+<li>Optionally enter the <strong>Datix reference</strong>, the <strong>NHS trust</strong>, the <strong>Dynamo incident</strong> it relates to (start typing the reference and pick it from the list) and a short note. These details are added to every file in that upload.</li>
+<li>Click <strong>Upload</strong>. Each file shows Uploaded when it's done; if one fails, the reason is shown next to it and you can remove it or try again.</li>
+</ol>
+<p>Underneath, every document is listed newest first. Use the search box to find documents by file name, Datix reference, trust, notes or incident reference. For each document you can:</p>
+<ul>
+<li><strong>Open</strong> it (it downloads or opens in a new tab);</li>
+<li><strong>Edit</strong> the file name, Datix reference, trust, linked incident and notes;</li>
+<li>see its <strong>History</strong>: who uploaded, opened and edited it, and when;</li>
+<li><strong>Delete</strong> it (admins only). This removes the file permanently.</li>
+</ul>
+<p>These documents often contain patient information. Only open them when you need to, don't download copies you don't need, and never forward them outside the company. Datix documents are included in the data protection tools (section 10).</p>
 <h3 id="sec-fleet-management">Fleet management</h3>
 <p><strong>Fleet Management</strong> has three tabs:</p>
 <ul>
@@ -537,9 +553,9 @@ hr { display:none; }
 <h3 id="sec-data-protection-admins">Data protection (admins)</h3>
 <p>The <strong>Data protection tools</strong> page (<code>/gdpr</code>) is for admins only. Sign in with your password and then your two-factor code (or a recovery code). It lets admins:</p>
 <ul>
-<li>find everything held about a person and download a subject access export (check and redact it before sending);</li>
+<li>find everything held about a person and download a subject access export (check and redact it before sending). Datix documents are matched on their details in Dynamo only, so open each listed file and check it by hand;</li>
 <li>anonymise a person following an erasure request;</li>
-<li>set retention periods, preview and run retention (including medication records: after the period, names and notes are removed from drug bag sign-outs, bag history and stock movements; minimum 2 years);</li>
+<li>set retention periods, preview and run retention (including Datix documents, which are deleted a set number of months after upload, minimum 3 years; and medication records: after the period, names and notes are removed from drug bag sign-outs, bag history and stock movements; minimum 2 years);</li>
 <li>view the log of every data protection action, including exports, anonymisations, retention runs, admin access changes, staff deletions and two-factor set-ups and resets.</li>
 </ul>
 <p>Retention is <strong>off until an admin enters the periods</strong>. Once set, it runs about once a day; use <strong>Preview</strong> first to see what would be removed.</p>

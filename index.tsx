@@ -124,6 +124,7 @@ async function snapshotDatabase() {
     "safety_alerts", "safety_alert_acks", "app_settings", "case_notes", "case_note_entries", "gdpr_log",
     "vehicles", "vdi_checks", "vehicle_defects", "assets", "asset_issues",
     "drug_bags", "drug_bag_movements", "drug_bag_events", "med_items", "med_batches", "med_movements",
+    "datix_documents", "datix_events",
   ];
   const out: Record<string, any[]> = {};
   for (const t of tables) out[t] = (await sql.unsafe(`SELECT * FROM ${t}`)) as any[];
@@ -846,6 +847,37 @@ async function ensureSchema() {
   `;
   await sql`CREATE INDEX IF NOT EXISTS med_movements_item ON med_movements (item_id, created_at DESC)`;
 
+  // ---- Datix: documents received from NHS trusts' Datix systems ----
+  await sql`
+    CREATE TABLE IF NOT EXISTS datix_documents (
+      id SERIAL PRIMARY KEY,
+      file_key TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      content_type TEXT,
+      file_size INTEGER,
+      datix_ref TEXT,
+      trust TEXT,
+      notes TEXT,
+      incident_id INTEGER REFERENCES incidents(id) ON DELETE SET NULL,
+      uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS datix_documents_uploaded ON datix_documents (uploaded_at DESC)`;
+  // Who uploaded, opened, changed or deleted each document.
+  await sql`
+    CREATE TABLE IF NOT EXISTS datix_events (
+      id SERIAL PRIMARY KEY,
+      document_id INTEGER REFERENCES datix_documents(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      details TEXT,
+      actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      actor_name TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+
   // ---- Company assets ----
   await sql`
     CREATE TABLE IF NOT EXISTS assets (
@@ -899,6 +931,7 @@ async function ensureSchema() {
   // Medication records (drug bag sign-out/in and stock movements): names are
   // removed after this many months; quantities, dates and bag numbers stay.
   await sql`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS retention_med_months INTEGER`;
+  await sql`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS retention_datix_months INTEGER`;
   await sql`ALTER TABLE drug_bag_movements ADD COLUMN IF NOT EXISTS anonymised_at TIMESTAMPTZ`;
   // Accountability record (Art. 5(2)) of every subject-access export,
   // anonymisation and retention run. Holds no personal data beyond the
@@ -2597,6 +2630,7 @@ async function renderPrivacyPage() {
 <li><strong>If you submit an incident report:</strong> your name, optionally your email address (so we can send you a reference), the vehicle registration, call sign, crew names, CAD reference, the date, time and place of the incident, your description, and any photos you attach. Near-miss reports can be made anonymously.</li>
 <li><strong>People mentioned in a report</strong> (for example patients, members of the public or colleagues): names and details that the reporter or investigating manager records. Reports about clinical care, safeguarding, medication or injuries may include <strong>information about a person's health</strong>, which is special category data.</li>
 <li><strong>If you complete a vehicle daily check:</strong> your name, the vehicle, its mileage, the check results and any defects you describe.</li>
+<li><strong>If you are mentioned in a document we receive from an NHS trust's Datix system</strong> (for example an incident report, feedback or a request for information about an incident involving our crews): whatever the trust has included, which may include names and information about a person's health. We store these documents so we can respond and investigate.</li>
 <li><strong>If a drug bag is signed out to you or returned by you:</strong> your name, the bag number, the seal colour, whether it was for an event (and which event) or frontline work, the vehicle and call sign, when it was signed out and returned, and whether any items were used.</li>
 <li><strong>If company equipment is issued to you:</strong> your name, the item, when it was issued and returned, and its condition on return.</li>
 <li><strong>Managers and administrators who use Dynamo:</strong> name, work email, phone number, role, sign-in credentials (stored only as a secure hash), and a record of actions taken on each incident.</li>
@@ -2620,6 +2654,7 @@ async function renderPrivacyPage() {
 <li>Staff accounts: until ${monthsLabel(r.inactiveStaffMonths, "a reasonable period")} after the account is closed, then anonymised.</li>
 <li>Vehicle daily checks: ${monthsLabel(r.vdiMonths, "in line with our records retention schedule")} after the check, unless a defect from it is still open.</li>
 <li>Drug bag and medication stock records: ${monthsLabel(r.medMonths, "in line with our records retention schedule (at least 2 years)")} after the bag is returned or the stock movement is made, after which names and notes are removed. Bag numbers, dates and quantities are kept for medicines accountability.</li>
+<li>Documents received from NHS trusts' Datix systems: ${monthsLabel(r.datixMonths, "in line with our records retention schedule (at least 3 years)")} after they are uploaded, then deleted.</li>
 <li>Equipment issue records: for as long as the item is held by the company, so that we can account for it; you can ask for your name to be removed once the item is returned.</li>
 </ul>
 
@@ -2696,6 +2731,7 @@ const GDPR_ADMIN_PAGE = `<!doctype html><html lang="en-GB"><head><meta charset="
         <div><label>Leaver accounts (months after deactivation)</label><input id="rStaff" type="number" min="1"/></div>
         <div><label>Vehicle checks (months, min 12)</label><input id="rVdi" type="number" min="12"/></div>
         <div><label>Medication records — names removed (months, min 24)</label><input id="rMed" type="number" min="24"/></div>
+        <div><label>Datix documents — deleted (months after upload, min 36)</label><input id="rDatix" type="number" min="36"/></div>
       </div>
       <button id="rSave">Save</button> <button id="rPreview" class="ghost">Preview what would be removed</button>
       <p class="muted" id="rLast"></p>
@@ -2805,12 +2841,12 @@ $("anonBtn").onclick = async () => {
 };
 async function loadRetention() {
   const r = await api("/api/gdpr/retention");
-  $("rInc").value = r.incidentMonths ?? ""; $("rCase").value = r.caseNoteMonths ?? ""; $("rStaff").value = r.inactiveStaffMonths ?? ""; $("rVdi").value = r.vdiMonths ?? ""; $("rMed").value = r.medMonths ?? "";
+  $("rInc").value = r.incidentMonths ?? ""; $("rCase").value = r.caseNoteMonths ?? ""; $("rStaff").value = r.inactiveStaffMonths ?? ""; $("rVdi").value = r.vdiMonths ?? ""; $("rMed").value = r.medMonths ?? ""; $("rDatix").value = r.datixMonths ?? "";
   $("rLast").textContent = r.lastRunAt ? "Last run: " + new Date(r.lastRunAt).toLocaleString("en-GB") : "Not run yet.";
 }
 $("rSave").onclick = async () => {
   try {
-    await api("/api/gdpr/retention", { method: "PUT", body: JSON.stringify({ incidentMonths: $("rInc").value, caseNoteMonths: $("rCase").value, inactiveStaffMonths: $("rStaff").value, vdiMonths: $("rVdi").value, medMonths: $("rMed").value }) });
+    await api("/api/gdpr/retention", { method: "PUT", body: JSON.stringify({ incidentMonths: $("rInc").value, caseNoteMonths: $("rCase").value, inactiveStaffMonths: $("rStaff").value, vdiMonths: $("rVdi").value, medMonths: $("rMed").value, datixMonths: $("rDatix").value }) });
     await loadRetention(); $("rOut").innerHTML = '<p>Saved.</p>';
   } catch (e) { $("rOut").innerHTML = '<p class="warn">' + esc(e.message) + "</p>"; }
 };
@@ -2824,9 +2860,10 @@ $("rPreview").onclick = async () => {
       list("Leaver accounts", p.staff, (r) => esc(r.name)) +
       list("Vehicle checks", p.vdiChecks, (r) => esc(r.vehicleReg) + " — " + esc(new Date(r.createdAt).toLocaleDateString("en-GB"))) +
       list("Drug bag sign-outs (names removed)", p.drugBagMovements, (r) => esc(r.bagNumber) + " — " + esc(new Date(r.signedOutAt).toLocaleDateString("en-GB"))) +
-      "<p>Drug bag history entries: " + p.drugBagEventCount + " · Stock movements: " + p.medMovementCount + " (names removed)</p>";
+      "<p>Drug bag history entries: " + p.drugBagEventCount + " · Stock movements: " + p.medMovementCount + " (names removed)</p>" +
+      list("Datix documents (deleted)", p.datixDocuments, (r) => esc(r.fileName) + " — " + esc(new Date(r.uploadedAt).toLocaleDateString("en-GB")));
     $("rRunBox").hidden = !(p.incidents.length || p.caseNotes.length || p.staff.length || p.vdiChecks.length ||
-      p.drugBagMovements.length || p.drugBagEventCount || p.medMovementCount);
+      p.drugBagMovements.length || p.drugBagEventCount || p.medMovementCount || p.datixDocuments.length);
   } catch (e) { $("rOut").innerHTML = '<p class="warn">' + esc(e.message) + "</p>"; }
 };
 $("rRun").onclick = async () => {
@@ -2993,6 +3030,17 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
         WHERE d.reported_by ILIKE ${like} ORDER BY d.reported_at ASC
       `
     : [];
+  // Datix documents: only the details typed into Dynamo can be searched; the
+  // files themselves must be checked by hand.
+  const datixDocuments = like || subject.user
+    ? await sql`
+        SELECT d.id, d.file_name, d.datix_ref, d.trust, d.notes, d.uploaded_at, i.ref AS incident_ref
+        FROM datix_documents d LEFT JOIN incidents i ON i.id = d.incident_id
+        WHERE d.uploaded_by = ${userId} OR d.file_name ILIKE ${like} OR d.notes ILIKE ${like} OR d.datix_ref ILIKE ${like}
+          OR d.incident_id IN ${sql((incidentRows as any[]).map((r) => r.id).concat([-1]))}
+        ORDER BY d.uploaded_at ASC
+      `
+    : [];
   const drugBagMovements = subject.name
     ? await sql`
         SELECT m.id, b.bag_number, m.signed_out_at, m.signed_out_to, m.second_crew, m.call_sign, m.seal_out,
@@ -3038,6 +3086,8 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
     vehicleDefectsReported,
     equipmentIssued,
     drugBagMovements,
+    datixDocuments,
+    datixDocumentsNote: "Datix files are matched on their details in Dynamo only. Open each listed file and check it for the requester's data before disclosure.",
   };
 }
 
@@ -3177,14 +3227,21 @@ async function anonymiseSubject(
       ` Audit trail names ${opts.includeAuditTrail ? "anonymised" : "retained"}.` +
       (freeTextRefs.length ? ` Free-text mentions left for manual review in ${freeTextRefs.length} incident(s).` : "")
   );
-  return { summary, manualReview: { incidentsWithFreeTextMentions: freeTextRefs, caseNotesWithMentions: caseNoteHits } };
+  // Datix files can't be edited in Dynamo; list them for manual review.
+  const datixHits = rx
+    ? ((await sql`
+        SELECT id, file_name FROM datix_documents
+        WHERE file_name ~* ${rx} OR notes ~* ${rx} OR datix_ref ~* ${rx}
+      `) as any[]).map((r) => `#${r.id} ${r.file_name}`)
+    : [];
+  return { summary, manualReview: { incidentsWithFreeTextMentions: freeTextRefs, caseNotesWithMentions: caseNoteHits, datixDocumentsWithMentions: datixHits } };
 }
 
 // ---- Retention ----
 async function getRetentionSettings() {
   const [row] = await sql`
     SELECT retention_incident_months, retention_case_note_months, retention_inactive_staff_months, retention_last_run_at,
-      retention_vdi_months, retention_med_months
+      retention_vdi_months, retention_med_months, retention_datix_months
     FROM app_settings WHERE id = 1
   `;
   return {
@@ -3193,6 +3250,7 @@ async function getRetentionSettings() {
     inactiveStaffMonths: row?.retention_inactive_staff_months ?? null,
     vdiMonths: row?.retention_vdi_months ?? null,
     medMonths: row?.retention_med_months ?? null,
+    datixMonths: row?.retention_datix_months ?? null,
     lastRunAt: row?.retention_last_run_at ?? null,
   };
 }
@@ -3257,11 +3315,19 @@ async function retentionCandidates() {
           AND (actor_id IS NOT NULL OR actor_name IS NOT NULL)
       `
     : [{ count: 0 }];
-  return { settings: s, incidents, caseNotes, staff, vdiChecks, drugBagMovements, drugBagEventCount, medMovementCount };
+  // Datix documents older than the period are deleted (file and record).
+  const datixDocs = s.datixMonths
+    ? await sql`
+        SELECT id, file_key, file_name, uploaded_at FROM datix_documents
+        WHERE uploaded_at < now() - make_interval(months => ${s.datixMonths})
+        ORDER BY uploaded_at ASC
+      `
+    : [];
+  return { settings: s, incidents, caseNotes, staff, vdiChecks, drugBagMovements, drugBagEventCount, medMovementCount, datixDocs };
 }
 
 async function runRetention(auth: any) {
-  const { settings, incidents, caseNotes, staff, vdiChecks, drugBagMovements } = await retentionCandidates();
+  const { settings, incidents, caseNotes, staff, vdiChecks, drugBagMovements, datixDocs } = await retentionCandidates();
   let filesDeleted = 0;
   let fileErrors = 0;
   // Files are deleted from storage for incidents being anonymised now, and
@@ -3345,6 +3411,19 @@ async function runRetention(auth: any) {
     `;
     medMovementsAnonymised = mm.length;
   }
+  let datixDeleted = 0;
+  let datixErrors = 0;
+  for (const d of datixDocs as any[]) {
+    try {
+      await storageDelete(d.file_key);
+      await sql`DELETE FROM datix_documents WHERE id = ${d.id}`;
+      await logDatix(null, auth, "RETENTION_DELETED", `Document #${d.id} deleted under the data retention policy`);
+      datixDeleted++;
+    } catch (err) {
+      datixErrors++;
+      console.log(`Retention: failed to delete Datix document ${d.id}: ${err}`);
+    }
+  }
   await sql`UPDATE app_settings SET retention_last_run_at = now() WHERE id = 1`;
   const result = {
     incidentsAnonymised: incidents.length,
@@ -3356,13 +3435,15 @@ async function runRetention(auth: any) {
     drugBagSignOutsAnonymised: drugBagMovements.length,
     drugBagHistoryAnonymised: drugBagEventsAnonymised,
     stockMovementsAnonymised: medMovementsAnonymised,
+    datixDocumentsDeleted: datixDeleted,
+    datixDeleteErrors: datixErrors,
   };
   await logGdpr(
     auth,
     "RETENTION_RUN",
     `Retention run (months — incidents ${settings.incidentMonths ?? "off"}, case notes ${settings.caseNoteMonths ?? "off"}, ` +
       `leavers ${settings.inactiveStaffMonths ?? "off"}, vehicle checks ${settings.vdiMonths ?? "off"}, ` +
-      `medication ${settings.medMonths ?? "off"}): ` +
+      `medication ${settings.medMonths ?? "off"}, Datix ${settings.datixMonths ?? "off"}): ` +
       Object.entries(result).map(([k, v]) => `${k} ${v}`).join(", ")
   );
   return result;
@@ -3376,7 +3457,7 @@ let retentionRunning = false;
 async function maybeRunRetention() {
   if (retentionRunning) return;
   const s = await getRetentionSettings();
-  if (!s.incidentMonths && !s.caseNoteMonths && !s.inactiveStaffMonths && !s.vdiMonths && !s.medMonths) return;
+  if (!s.incidentMonths && !s.caseNoteMonths && !s.inactiveStaffMonths && !s.vdiMonths && !s.medMonths && !s.datixMonths) return;
   if (s.lastRunAt && Date.now() - new Date(s.lastRunAt).getTime() < 24 * 3600 * 1000) return;
   retentionRunning = true;
   try {
@@ -3482,7 +3563,7 @@ async function handleGdprRequest(req: Request, url: URL, path: string, method: s
       if (!Number.isFinite(n) || n < min || n > 600) throw new Error(`Retention periods must be between ${min} and 600 months`);
       return n;
     };
-    let incident, caseNote, staff, vdi, med;
+    let incident, caseNote, staff, vdi, med, datix;
     try {
       // Floors stop an accidental "1" from wiping recent records:
       // incidents at least 3 years (RIDDOR records must be kept 3 years).
@@ -3492,15 +3573,18 @@ async function handleGdprRequest(req: Request, url: URL, path: string, method: s
       vdi = clean(body.vdiMonths, 12);
       // Controlled drug records must be kept at least 2 years.
       med = clean(body.medMonths, 24);
+      // Datix documents are incident records: same 3-year floor as incidents.
+      datix = clean(body.datixMonths, 36);
     } catch (err: any) {
       return json({ error: err.message }, 400);
     }
     await sql`
       UPDATE app_settings SET retention_incident_months = ${incident}, retention_case_note_months = ${caseNote},
-        retention_inactive_staff_months = ${staff}, retention_vdi_months = ${vdi}, retention_med_months = ${med}, updated_at = now()
+        retention_inactive_staff_months = ${staff}, retention_vdi_months = ${vdi}, retention_med_months = ${med},
+        retention_datix_months = ${datix}, updated_at = now()
       WHERE id = 1
     `;
-    await logGdpr(auth, "RETENTION_SETTINGS", `Retention set: incidents ${incident ?? "off"}, case notes ${caseNote ?? "off"}, leavers ${staff ?? "off"}, vehicle checks ${vdi ?? "off"}, medication ${med ?? "off"} (months)`);
+    await logGdpr(auth, "RETENTION_SETTINGS", `Retention set: incidents ${incident ?? "off"}, case notes ${caseNote ?? "off"}, leavers ${staff ?? "off"}, vehicle checks ${vdi ?? "off"}, medication ${med ?? "off"}, Datix ${datix ?? "off"} (months)`);
     return json(await getRetentionSettings());
   }
 
@@ -3515,6 +3599,7 @@ async function handleGdprRequest(req: Request, url: URL, path: string, method: s
       drugBagMovements: (c.drugBagMovements as any[]).map((r) => ({ id: r.id, bagNumber: r.bag_number, signedOutAt: r.signed_out_at })),
       drugBagEventCount: c.drugBagEventCount,
       medMovementCount: c.medMovementCount,
+      datixDocuments: (c.datixDocs as any[]).map((r) => ({ id: r.id, fileName: r.file_name, uploadedAt: r.uploaded_at })),
     });
   }
 
@@ -3862,6 +3947,161 @@ async function nextAssetTag(): Promise<string> {
     SELECT COALESCE(MAX(CAST(substring(asset_tag FROM '^A-([0-9]+)$') AS INT)), 0) AS max FROM assets
   `;
   return `A-${String(Number(max || 0) + 1).padStart(4, "0")}`;
+}
+
+// =====================================================================
+// Datix: a drag-and-drop store for documents received from NHS trusts'
+// Datix systems (reports, feedback, investigation requests). Managers and
+// admins only. Files go to the EU bucket; every upload, download, change
+// and deletion is recorded in datix_events.
+// =====================================================================
+const DATIX_MAX_BYTES = 25 * 1024 * 1024;
+const DATIX_EXTENSIONS = [
+  "pdf", "doc", "docx", "rtf", "odt", "txt", "csv", "xls", "xlsx", "ods", "msg", "eml", "htm", "html",
+  "jpg", "jpeg", "png", "gif", "webp", "heic", "tif", "tiff", "zip",
+];
+
+function serializeDatixDocument(row: any) {
+  return {
+    id: row.id,
+    fileName: row.file_name,
+    contentType: row.content_type,
+    fileSize: row.file_size,
+    datixRef: row.datix_ref,
+    trust: row.trust,
+    notes: row.notes,
+    incidentId: row.incident_id,
+    incidentRef: row.incident_ref ?? null,
+    uploadedBy: row.uploaded_by,
+    uploadedByName: row.uploaded_by_name ?? null,
+    uploadedAt: row.uploaded_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function logDatix(documentId: number | null, auth: any, action: string, details?: string | null) {
+  await sql`
+    INSERT INTO datix_events (document_id, action, details, actor_id, actor_name)
+    VALUES (${documentId}, ${action}, ${details || null}, ${auth?.sub || null}, ${auth?.name || null})
+  `;
+}
+
+// Accepts an incident reference ("26/11/2026 - 0002") or id; returns the id or null.
+async function resolveIncidentRef(v: any): Promise<number | null | "invalid"> {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  const [row] = /^\d+$/.test(s)
+    ? await sql`SELECT id FROM incidents WHERE id = ${Number(s)}`
+    : await sql`SELECT id FROM incidents WHERE ref = ${s}`;
+  return row ? row.id : "invalid";
+}
+
+async function getDatixDocument(id: number) {
+  const [row] = await sql`
+    SELECT d.*, i.ref AS incident_ref, u.name AS uploaded_by_name FROM datix_documents d
+    LEFT JOIN incidents i ON i.id = d.incident_id
+    LEFT JOIN users u ON u.id = d.uploaded_by
+    WHERE d.id = ${id}
+  `;
+  return row || null;
+}
+
+async function handleDatixRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+  if (!path.startsWith("/api/datix")) return null;
+  const auth = await getAuth(req);
+  if (!auth) return json({ error: "Unauthorized" }, 401);
+  if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+
+  if (path === "/api/datix" && method === "GET") {
+    const q = String(url.searchParams.get("q") || "").trim();
+    const like = q ? `%${q.replace(/[%_\\]/g, "\\$&")}%` : null;
+    const rows = await sql`
+      SELECT d.*, i.ref AS incident_ref, u.name AS uploaded_by_name FROM datix_documents d
+      LEFT JOIN incidents i ON i.id = d.incident_id
+      LEFT JOIN users u ON u.id = d.uploaded_by
+      WHERE ${like}::text IS NULL OR d.file_name ILIKE ${like} OR d.datix_ref ILIKE ${like} OR d.trust ILIKE ${like}
+        OR d.notes ILIKE ${like} OR i.ref ILIKE ${like}
+      ORDER BY d.uploaded_at DESC
+      LIMIT 500
+    `;
+    return json((rows as any[]).map(serializeDatixDocument));
+  }
+
+  // One file per request (the page sends each dropped file separately, so a
+  // slow connection only has to carry one file at a time).
+  if (path === "/api/datix" && method === "POST") {
+    const form = await req.formData().catch(() => null);
+    if (!form) return json({ error: "Send the file as a form upload." }, 400);
+    const file = form.get("file");
+    if (!file || typeof file === "string" || file.size === 0) return json({ error: "Choose a file to upload." }, 400);
+    if (file.size > DATIX_MAX_BYTES) return json({ error: `"${file.name}" is too large (25 MB max).` }, 400);
+    const ext = (String(file.name).match(/\.([A-Za-z0-9]+)$/)?.[1] || "").toLowerCase();
+    if (!DATIX_EXTENSIONS.includes(ext)) {
+      return json({ error: `"${file.name}" isn't a supported file type. Use PDF, Word, Excel, email (.msg/.eml), text, image or zip.` }, 400);
+    }
+    const incident = await resolveIncidentRef(form.get("incidentRef"));
+    if (incident === "invalid") return json({ error: "No incident has that reference. Check it, or leave it blank." }, 400);
+    const datixRef = cleanText(form.get("datixRef"), 80);
+    const trust = cleanText(form.get("trust"), 160);
+    const notes = cleanText(form.get("notes"), 2000);
+    const fileName = String(file.name).slice(0, 180);
+    const key = `datix/${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${sanitizeFileName(fileName)}`;
+    await s3.file(key).write(await file.arrayBuffer(), { type: file.type || "application/octet-stream" });
+    const [row] = await sql`
+      INSERT INTO datix_documents (file_key, file_name, content_type, file_size, datix_ref, trust, notes, incident_id, uploaded_by)
+      VALUES (${key}, ${fileName}, ${file.type || null}, ${file.size}, ${datixRef}, ${trust}, ${notes}, ${incident}, ${auth.sub})
+      RETURNING id
+    `;
+    await logDatix(row.id, auth, "UPLOADED", `${fileName} uploaded by ${auth.name}`);
+    return json(serializeDatixDocument(await getDatixDocument(row.id)), 201);
+  }
+
+  const m = path.match(/^\/api\/datix\/(\d+)(\/(download|history))?$/);
+  if (!m) return json({ error: "Not found" }, 404);
+  const id = Number(m[1]);
+  const action = m[3] || null;
+  const doc = await getDatixDocument(id);
+  if (!doc) return json({ error: "Document not found" }, 404);
+
+  if (action === "download" && method === "GET") {
+    const downloadUrl = await storagePresign(doc.file_key);
+    await logDatix(id, auth, "OPENED", `${doc.file_name} opened by ${auth.name}`);
+    return json({ url: downloadUrl, fileName: doc.file_name });
+  }
+
+  if (action === "history" && method === "GET") {
+    const rows = await sql`SELECT * FROM datix_events WHERE document_id = ${id} ORDER BY created_at ASC`;
+    return json((rows as any[]).map((r) => ({ id: r.id, action: r.action, details: r.details, actorName: r.actor_name, createdAt: r.created_at })));
+  }
+
+  if (!action && method === "PUT") {
+    const body = await req.json().catch(() => ({}));
+    const incident = await resolveIncidentRef(body.incidentRef);
+    if (incident === "invalid") return json({ error: "No incident has that reference. Check it, or leave it blank." }, 400);
+    const fileName = cleanText(body.fileName, 180) || doc.file_name;
+    await sql`
+      UPDATE datix_documents SET file_name = ${fileName}, datix_ref = ${cleanText(body.datixRef, 80)},
+        trust = ${cleanText(body.trust, 160)}, notes = ${cleanText(body.notes, 2000)}, incident_id = ${incident}, updated_at = now()
+      WHERE id = ${id}
+    `;
+    await logDatix(id, auth, "EDITED", `Details updated by ${auth.name}`);
+    return json(serializeDatixDocument(await getDatixDocument(id)));
+  }
+
+  if (!action && method === "DELETE") {
+    if (!isAdmin(auth)) return json({ error: "Only an admin can delete a Datix document." }, 403);
+    try {
+      await storageDelete(doc.file_key);
+    } catch (err) {
+      console.log(`Datix: failed to delete file for document ${id}: ${err}`);
+      return json({ error: "The file couldn't be deleted from storage. Try again." }, 500);
+    }
+    await sql`DELETE FROM datix_documents WHERE id = ${id}`;
+    await logDatix(null, auth, "DELETED", `Document #${id} deleted by ${auth.name}`);
+    return new Response(null, { status: 204 });
+  }
+
+  return json({ error: "Not found" }, 404);
 }
 
 async function handleAssetsRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
@@ -5243,6 +5483,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (medicationResponse) return medicationResponse;
     const fleetResponse = await handleFleetRequest(req, url, path, method, ip);
     if (fleetResponse) return fleetResponse;
+    const datixResponse = await handleDatixRequest(req, url, path, method);
+    if (datixResponse) return datixResponse;
     // Company Assets has been removed from the app. Its API is switched off
     // (requests fall through to 404), but the assets / asset_issues tables
     // and their data are kept, and still covered by the GDPR tools.
