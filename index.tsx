@@ -2865,6 +2865,17 @@ $("exportBtn").onclick = async () => {
     const blob = await res.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob); a.download = "subject-access-export-" + new Date().toISOString().slice(0, 10) + ".json"; a.click();
+    // Tell the admin if Datix documents were left out (no Datix access).
+    try {
+      const data = JSON.parse(await blob.text());
+      const old = document.getElementById("datixWithheld"); if (old) old.remove();
+      if (data.datixDocumentsWithheld) {
+        const p = document.createElement("div");
+        p.id = "datixWithheld"; p.className = "card warn";
+        p.textContent = "Export downloaded, but Datix documents were left out: " + data.datixDocumentsNote;
+        $("results").prepend(p);
+      }
+    } catch (_) {}
   } catch (e) { alert(e.message); }
 };
 $("anonBtn").onclick = async () => {
@@ -3012,7 +3023,7 @@ function matchReasons(r: any): string[] {
   return out;
 }
 
-async function buildSubjectExport(subject: { user: any; email: string | null; name: string | null }) {
+async function buildSubjectExport(subject: { user: any; email: string | null; name: string | null }, auth: any = null) {
   const userId = subject.user?.id ?? -1;
   const like = subject.name ? `%${subject.name.replace(/[%_\\]/g, "\\$&")}%` : null;
   const daysToRespond = await getDaysToRespond();
@@ -3125,9 +3136,27 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
     vehicleDefectsReported,
     equipmentIssued,
     drugBagMovements,
-    datixDocuments,
-    datixDocumentsNote: "Datix files are matched on their details in Dynamo only. Open each listed file and check it for the requester's data before disclosure.",
+    // Datix documents are only shown to admins with Datix access; others get
+    // the number of matches and who to ask.
+    ...(auth?.datixAccess
+      ? {
+          datixDocuments,
+          datixDocumentsNote: "Datix files are matched on their details in Dynamo only. Open each listed file and check it for the requester's data before disclosure.",
+        }
+      : {
+          datixDocuments: [],
+          datixDocumentsWithheld: (datixDocuments as any[]).length,
+          datixDocumentsNote: (datixDocuments as any[]).length
+            ? `${(datixDocuments as any[]).length} Datix document(s) may relate to this person, but only staff with Datix access can see them. ` +
+              `Ask one of them (${await datixAuthorisedNames()}) to run this export, or to review those documents, before you respond.`
+            : "No Datix documents matched.",
+        }),
   };
+}
+
+async function datixAuthorisedNames(): Promise<string> {
+  const rows = await sql`SELECT name FROM users WHERE datix_access = TRUE AND active = TRUE ORDER BY name`;
+  return (rows as any[]).map((r) => r.name).join(", ") || "nobody is authorised yet";
 }
 
 // Replace occurrences of a name inside a text column, case-insensitively.
@@ -3274,7 +3303,14 @@ async function anonymiseSubject(
         WHERE file_name ~* ${rx} OR notes ~* ${rx} OR datix_ref ~* ${rx}
       `) as any[]).map((r) => `#${r.id} ${r.file_name}`)
     : [];
-  return { summary, manualReview: { incidentsWithFreeTextMentions: freeTextRefs, caseNotesWithMentions: caseNoteHits, datixDocumentsWithMentions: datixHits } };
+  // Only admins with Datix access see which Datix documents mention the person.
+  const datixReview = auth?.datixAccess
+    ? { datixDocumentsWithMentions: datixHits }
+    : datixHits.length
+      ? { datixDocumentsWithMentions: [], datixDocumentsWithheld: datixHits.length,
+          datixNote: `${datixHits.length} Datix document(s) may mention this person. Ask someone with Datix access (${await datixAuthorisedNames()}) to review them.` }
+      : { datixDocumentsWithMentions: [] };
+  return { summary, manualReview: { incidentsWithFreeTextMentions: freeTextRefs, caseNotesWithMentions: caseNoteHits, ...datixReview } };
 }
 
 // ---- Retention ----
@@ -3556,7 +3592,7 @@ async function handleGdprRequest(req: Request, url: URL, path: string, method: s
     if (!subject.user && !subject.email && !subject.name) {
       return json({ error: "Enter a staff member, an email address, or a name (3+ characters)." }, 400);
     }
-    const data = await buildSubjectExport(subject);
+    const data = await buildSubjectExport(subject, auth);
     // No details of the requester go in the incident trail (the full record
     // is in the data protection log); just that the incident was disclosed.
     await logBulkIncidentAudit(
@@ -3569,7 +3605,8 @@ async function handleGdprRequest(req: Request, url: URL, path: string, method: s
       auth,
       "SUBJECT_ACCESS_EXPORT",
       `Subject access export generated for ${subject.user ? `staff account #${subject.user.id}` : "a non-staff data subject"} ` +
-        `(${data.incidents.length} incident(s) matched)`
+        `(${data.incidents.length} incident(s) matched` +
+        ((data as any).datixDocumentsWithheld ? `; ${(data as any).datixDocumentsWithheld} Datix document(s) withheld — exporter has no Datix access` : "") + `)`
     );
     return new Response(JSON.stringify(data, null, 2), {
       headers: {
