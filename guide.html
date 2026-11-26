@@ -49,7 +49,7 @@ hr { display:none; }
 <body>
 <header><div class="wrap"><div class="logo">D</div><div>
 <h1>Dynamo User Guide</h1>
-<p>Incident reporting, medication, Datix, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.2, 26 November 2026</p>
+<p>Incident reporting, medication, Datix, regulatory compliance and fleet management · Medical Emergency Solutions · Version 1.3, 26 November 2026</p>
 </div><a class="back" href="/settings">← Back to Dynamo</a></div></header>
 <div class="layout">
 <nav aria-label="Contents"><div class="label">Contents</div><a href="#sec-1-introduction">1. Introduction</a><a href="#sec-2-reporting-an-incident-crew-qr-form">2. Reporting an incident (crew — QR form)</a><a href="#sec-3-reporting-an-incident-managers-inside-dynamo">3. Reporting an incident (managers — inside Dynamo)</a><a href="#sec-4-managing-incidents">4. Managing incidents</a><a href="#sec-5-harm-and-duty-of-candour">5. Harm and duty of candour</a><a href="#sec-6-riddor-and-cqc-reporting">6. RIDDOR and CQC reporting</a><a href="#sec-7-investigating-and-closing-an-incident">7. Investigating and closing an incident</a><a href="#sec-8-photos-actions-alerts-audit-trail-and-exports">8. Photos, actions, alerts, audit trail and exports</a><a href="#sec-9-dashboard-case-notes-and-fleet">9. Dashboard, case notes, medication, Datix and fleet</a><a href="#sec-10-admin-tasks">10. Admin tasks</a><a href="#sec-11-quick-reference">11. Quick reference</a></nav>
@@ -451,6 +451,13 @@ hr { display:none; }
 <h3 id="sec-datix-documents">Datix</h3>
 <p>The <strong>Datix</strong> section of the sidebar is where managers and admins keep documents received from NHS trusts' Datix systems, such as incident reports, feedback and requests for information about our crews.</p>
 <p>It has two pages: the <strong>Datix Dashboard</strong> (an overview and the list of NHS trusts) and <strong>Datix Documents</strong> (where you upload and find the documents).</p>
+<h4>Who can open Datix documents</h4>
+<p><strong>You must be authorised before you can open a Datix document.</strong> Only four people are authorised: the two directors, Darren Teale and the Clinical Team Manager (CTM). Everyone else with a Dynamo account can upload Datix documents and see the list (file name, trust, Datix reference, dates), but can't open, edit or delete them, and can't see the notes. Ask one of the authorised staff if you need to see a document.</p>
+<ul>
+<li>The Datix pages show who is authorised. If you aren't, files show a 🔒 padlock and there is no <strong>Open</strong> button.</li>
+<li>Every time a document is opened, and every attempt to open one without authorisation, is recorded in that document's <strong>History</strong>.</li>
+<li>Access is given on the Staff page (see section 10). No more than four people can have it at a time.</li>
+</ul>
 <p><strong>Getting started:</strong> first add the NHS trusts you work with (see <em>NHS trusts</em> below), then upload documents and choose the trust for each. You can also add a trust while uploading.</p>
 <h4>Datix dashboard</h4>
 <p>The <strong>Datix Dashboard</strong> shows:</p>
@@ -476,10 +483,10 @@ hr { display:none; }
 </ol>
 <p>Underneath, every document is listed newest first. Use the search box to find documents by file name, Datix reference, trust (full or short name), notes or incident reference. Use the trust dropdown to show one trust's documents (or those with no trust recorded), and tick <strong>Not linked to an incident</strong> to see documents still to be linked. For each document you can:</p>
 <ul>
-<li><strong>Open</strong> it (it downloads or opens in a new tab);</li>
-<li><strong>Edit</strong> the file name, Datix reference, trust, linked incident and notes;</li>
+<li><strong>Open</strong> it (authorised staff only; it downloads or opens in a new tab);</li>
+<li><strong>Edit</strong> the file name, Datix reference, trust, linked incident and notes (authorised staff only);</li>
 <li>see its <strong>History</strong>: who uploaded, opened and edited it, and when;</li>
-<li><strong>Delete</strong> it (admins only). This removes the file permanently.</li>
+<li><strong>Delete</strong> it (admins with Datix access only). This removes the file permanently.</li>
 </ul>
 <p>These documents often contain patient information. Only open them when you need to, don't download copies you don't need, and never forward them outside the company. Datix documents are included in the data protection tools (section 10).</p>
 <h3 id="sec-fleet-management">Fleet management</h3>
@@ -512,6 +519,7 @@ hr { display:none; }
 <li>Changing someone's role signs them out so the new role applies straight away.</li>
 <li>Admin changes, account deletions and two-factor resets are recorded in the data protection log.</li>
 </ul>
+<p><strong>Datix access:</strong> the <strong>Datix</strong> column shows who can open Datix documents, with their role (for example Director or Clinical Team Manager). To give or remove access, an <strong>admin who already has Datix access</strong> opens the person (click their row) and ticks or unticks <strong>Can open Datix documents</strong> under Datix access, chooses their role and saves. Other admins and managers can't change it. No more than four people can have access; remove someone's access before giving it to someone new. There must always be at least one admin with access. Deactivating an account removes its Datix access. Every change is recorded in the data protection log.</p>
 <p><strong>Two-factor sign-in:</strong> the <strong>Two-factor</strong> column shows whether each person has set it up. <strong>Reset 2FA</strong> clears it, for example after a lost or new phone. The person is signed out and sets it up again at their next sign-in. Nobody can reset their own; use a recovery code or ask another admin.</p>
 <p><strong>If the only admin has lost both their phone and their recovery codes:</strong> whoever manages the hosting (Railway) sets the variable <code>MFA_RESET_EMAIL</code> to that admin's email and lets Dynamo restart. The admin then signs in and sets up two-factor again. Delete the variable straight afterwards. The reset is logged.</p>
 <h3 id="sec-settings">Settings</h3>
@@ -653,8 +661,10 @@ QR reports always start as LOW. Review it, set the severity and harm level, and 
 Go to Datix → <strong>Datix Documents</strong> and drag the file (or the email saved as .msg or .eml) onto the box. Choose the trust, add the Datix reference, and link it to the Dynamo incident if there is one.</p>
 <p><strong>The trust I need isn't in the dropdown.</strong>
 Pick <strong>+ Add a new NHS trust…</strong> at the bottom of the dropdown, or add it from the NHS trusts list on the Datix Dashboard. If it's there but archived, tick <strong>Show archived</strong> on the dashboard, edit it and set it back to Active.</p>
+<p><strong>I can't open a Datix document.</strong>
+Only the four authorised staff (the two directors, Darren Teale and the Clinical Team Manager) can open them. Ask one of them. The Datix pages list who they are.</p>
 <p><strong>I uploaded a Datix document by mistake.</strong>
-Ask an admin to delete it (only admins can). If you just chose the wrong trust or incident, click <strong>Edit</strong> and correct it.</p><a class="top" href="#sec-1-introduction">Back to top ↑</a></main>
+Ask an admin with Datix access to delete it. If you just chose the wrong trust or incident, click <strong>Edit</strong> and correct it.</p><a class="top" href="#sec-1-introduction">Back to top ↑</a></main>
 </div>
 <script>
 (function(){

@@ -565,6 +565,7 @@ const api = {
   listIncidents: () => request('/incidents'),
   listDatix: (params) => request('/datix', { params }),
   getDatixDashboard: () => request('/datix/dashboard'),
+  getDatixAuthorised: () => request('/datix/authorised'),
   listDatixTrusts: (all) => request('/datix/trusts', { params: { all: all ? 1 : undefined } }),
   createDatixTrust: (data) => request('/datix/trusts', { method: 'POST', body: data }),
   updateDatixTrust: (id, data) => request(`/datix/trusts/${id}`, { method: 'PUT', body: data }),
@@ -880,6 +881,7 @@ function Layout({ children }) {
 
 
 const ROLES = ['MANAGER', 'ADMIN'];
+const DATIX_ROLES = ['Director', 'Clinical Team Manager', 'Registered Manager', 'Other'];
 
 function StaffModal({ staff, onClose, onSaved }) {
   const isEdit = !!staff;
@@ -896,6 +898,10 @@ function StaffModal({ staff, onClose, onSaved }) {
   const iAmAdmin = me?.role === 'ADMIN';
   // Managers can't give admin access or edit an admin's account (enforced on the server too).
   const lockedAdmin = isEdit && staff.role === 'ADMIN' && !iAmAdmin;
+  // Only an admin who has Datix access can change who can open Datix documents.
+  const canManageDatix = isEdit && iAmAdmin && !!me?.datixAccess;
+  const [datixAccess, setDatixAccess] = useState(!!staff?.datixAccess);
+  const [datixRole, setDatixRole] = useState(staff?.datixRole || '');
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -908,6 +914,7 @@ function StaffModal({ staff, onClose, onSaved }) {
     try {
       const payload = { name, email, phone, role, active };
       if (password) payload.password = password;
+      if (canManageDatix) { payload.datixAccess = datixAccess; payload.datixRole = datixAccess ? (datixRole || null) : null; }
       if (isEdit) {
         await api.updateStaff(staff.id, payload);
       } else {
@@ -990,6 +997,31 @@ function StaffModal({ staff, onClose, onSaved }) {
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={12} placeholder={isEdit ? 'Leave blank to keep current password' : 'Leave blank to generate a temporary password'} />
             <small className="muted">At least 12 characters; not a common password or your email name.</small>
           </div>
+
+          {isEdit && (
+            <div className="form-field form-field-wide" style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+              <label>Datix access</label>
+              {canManageDatix ? (
+                <>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 400, color: 'var(--text)', fontSize: 14 }}>
+                    <input type="checkbox" checked={datixAccess} onChange={(e) => setDatixAccess(e.target.checked)} style={{ width: 'auto' }} />
+                    Can open Datix documents (maximum 4 people)
+                  </label>
+                  {datixAccess && (
+                    <select value={datixRole} onChange={(e) => setDatixRole(e.target.value)} style={{ marginTop: 6 }}>
+                      <option value="">— Role (optional) —</option>
+                      {DATIX_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  )}
+                </>
+              ) : (
+                <div style={{ fontSize: 14 }}>
+                  {staff.datixAccess ? `Yes${staff.datixRole ? ` — ${staff.datixRole}` : ''}` : 'No'}
+                  <div className="muted" style={{ fontSize: 12 }}>Only an admin who has Datix access can change this.</div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="modal-footer">
@@ -2765,6 +2797,8 @@ function DatixDocuments() {
   const [incidentRefs, setIncidentRefs] = useState([]);
   const [editing, setEditing] = useState(null);
   const [historyFor, setHistoryFor] = useState(null);
+  const [authorised, setAuthorised] = useState(null);
+  const canOpen = !!authorised?.youCanOpen;
   const fileInput = useRef(null);
   const dragDepth = useRef(0);
 
@@ -2779,6 +2813,7 @@ function DatixDocuments() {
 
   useEffect(() => {
     loadTrusts();
+    api.getDatixAuthorised().then(setAuthorised).catch(() => {});
     api.listIncidents().then((rows) => setIncidentRefs(rows.map((r) => r.ref))).catch(() => {});
   }, []);
 
@@ -2873,6 +2908,7 @@ function DatixDocuments() {
       </p>
 
       {error && <div className="error-banner">{error}</div>}
+      {authorised && <DatixAccessBanner authorised={authorised} />}
 
       <div className="card" style={{ marginBottom: 20 }}>
         <div
@@ -2985,8 +3021,12 @@ function DatixDocuments() {
               {docs.map((d) => (
                 <tr key={d.id}>
                   <td>
-                    <a href="#" onClick={(e) => { e.preventDefault(); openDoc(d); }}>{datixFileIcon(d.fileName)} {d.fileName}</a>
-                    <div className="muted" style={{ fontSize: 12 }}>{fmtFileSize(d.fileSize)}{d.notes ? ' · ' + d.notes : ''}</div>
+                    {canOpen
+                      ? <a href="#" onClick={(e) => { e.preventDefault(); openDoc(d); }}>{datixFileIcon(d.fileName)} {d.fileName}</a>
+                      : <span title="Only authorised staff can open Datix documents">🔒 {d.fileName}</span>}
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {fmtFileSize(d.fileSize)}{d.notes ? ' · ' + d.notes : (d.hasNotes && !canOpen ? ' · notes hidden' : '')}
+                    </div>
                   </td>
                   <td>{d.datixRef || '—'}</td>
                   <td>{d.trust || '—'}</td>
@@ -2996,10 +3036,10 @@ function DatixDocuments() {
                     <div className="muted" style={{ fontSize: 12 }}>{d.uploadedByName || ''}</div>
                   </td>
                   <td className="actions-cell" style={{ whiteSpace: 'nowrap' }}>
-                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => openDoc(d)}>Open</button>
-                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditing(d)}>Edit</button>
+                    {canOpen && <button type="button" className="btn btn-ghost btn-sm" onClick={() => openDoc(d)}>Open</button>}
+                    {canOpen && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditing(d)}>Edit</button>}
                     <button type="button" className="btn btn-ghost btn-sm" onClick={() => setHistoryFor(d)}>History</button>
-                    {isAdminUser && <button type="button" className="btn btn-ghost btn-sm" onClick={() => removeDoc(d)}>Delete</button>}
+                    {isAdminUser && canOpen && <button type="button" className="btn btn-ghost btn-sm" onClick={() => removeDoc(d)}>Delete</button>}
                   </td>
                 </tr>
               ))}
@@ -3013,6 +3053,24 @@ function DatixDocuments() {
           onSaved={() => { setEditing(null); load(); }} />
       )}
       {historyFor && <DatixHistoryModal doc={historyFor} onClose={() => setHistoryFor(null)} />}
+    </div>
+  );
+}
+
+// Who can open Datix documents. Shown on both Datix pages.
+function DatixAccessBanner({ authorised, compact }) {
+  const names = authorised.staff.map((p) => p.name + (p.datixRole ? ` (${p.datixRole})` : '')).join(', ') || 'nobody yet';
+  if (authorised.youCanOpen) {
+    return compact ? null : (
+      <div className="success-banner" style={{ marginBottom: 14 }}>
+        🔓 <strong>You're authorised to open Datix documents.</strong> Authorised staff: {names}. Every document you open is recorded.
+      </div>
+    );
+  }
+  return (
+    <div className="warning-banner" style={{ marginBottom: 14 }}>
+      🔒 <strong>You need authorisation to open Datix documents.</strong> You can upload them and see the list, but only
+      the authorised staff can open them: {names}. Ask one of them if you need to see a document.
     </div>
   );
 }
@@ -3126,6 +3184,7 @@ function DatixTrustModal({ trust, onClose, onSaved }) {
 
 function DatixDashboard() {
   const [d, setD] = useState(null);
+  const [authorised, setAuthorised] = useState(null);
   const [error, setError] = useState('');
   const [editingTrust, setEditingTrust] = useState(null); // trust object, 'new', or null
   const [showArchived, setShowArchived] = useState(false);
@@ -3134,6 +3193,7 @@ function DatixDashboard() {
   function load() {
     setError('');
     api.getDatixDashboard().then(setD).catch((err) => setError(err.message || 'Failed to load the Datix dashboard'));
+    api.getDatixAuthorised().then(setAuthorised).catch(() => {});
   }
   useEffect(() => { load(); }, []);
 
@@ -3173,6 +3233,8 @@ function DatixDashboard() {
           <button className="btn btn-primary" onClick={() => goDocs()}>Upload documents</button>
         </div>
       </div>
+
+      {authorised && !authorised.youCanOpen && <DatixAccessBanner authorised={authorised} />}
 
       <div className="kpi-grid">
         <div className="kpi-card row-clickable" onClick={() => goDocs()}>
@@ -3231,6 +3293,28 @@ function DatixDashboard() {
           <MedActionList rows={d.unlinked} empty="Every document is linked to a Dynamo incident." render={docRow} />
         </MedPanel>
       </div>
+
+      {authorised && (
+        <div className="card" style={{ marginTop: 20 }}>
+          <div className="kpi-panel-header">
+            <div className="kpi-panel-title">Who can open Datix documents</div>
+            <div className="muted">{authorised.staff.length} of {authorised.max} authorised</div>
+          </div>
+          {authorised.staff.length === 0 ? <div className="empty">Nobody is authorised yet.</div> : (
+            <div className="kpi-list">
+              {authorised.staff.map((p) => (
+                <div key={p.id} className="kpi-list-row">
+                  <div style={{ fontWeight: 600 }}>🔓 {p.name}</div>
+                  <div className="muted" style={{ fontSize: 13 }}>{p.datixRole || '—'}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+            Everyone else can upload Datix documents but can't open them. An admin with Datix access changes this on the Staff page (Edit → Datix access).
+          </div>
+        </div>
+      )}
 
       <div className="card table-card" id="datix-trusts" style={{ marginTop: 20 }}>
         <div style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -3362,7 +3446,7 @@ function DatixEditModal({ doc, incidentRefs, trusts, onTrustAdded, onClose, onSa
 function DatixHistoryModal({ doc, onClose }) {
   const [rows, setRows] = useState(null);
   useEffect(() => { api.getDatixHistory(doc.id).then(setRows).catch(() => setRows([])); }, []);
-  const label = { UPLOADED: 'Uploaded', OPENED: 'Opened', EDITED: 'Edited' };
+  const label = { UPLOADED: 'Uploaded', OPENED: 'Opened', EDITED: 'Edited', OPEN_REFUSED: 'Tried to open (not authorised)' };
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
@@ -3449,6 +3533,7 @@ function Staff() {
                 <th>Role</th>
                 <th>Status</th>
                 <th>Two-factor</th>
+                <th>Datix</th>
                 <th></th>
               </tr>
             </thead>
@@ -3468,6 +3553,11 @@ function Staff() {
                     <span className={'badge ' + (s.mfaEnabled ? 'badge-green' : 'badge-grey')}>
                       {s.mfaEnabled ? 'On' : 'Not set up'}
                     </span>
+                  </td>
+                  <td>
+                    {s.datixAccess
+                      ? <span className="badge badge-blue" title="Can open Datix documents">🔓 {s.datixRole || 'Access'}</span>
+                      : <span className="muted">—</span>}
                   </td>
                   <td className="actions-cell">
                     {s.mfaEnabled && s.id !== me?.id && (s.role !== 'ADMIN' || me?.role === 'ADMIN') && (

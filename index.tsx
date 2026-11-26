@@ -524,6 +524,10 @@ async function ensureSchema() {
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled_at TIMESTAMPTZ`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_recovery_hashes JSONB`;
+  // Datix access: only these staff (at most DATIX_MAX_AUTHORISED) can open
+  // Datix documents. datix_role is shown on the Staff page (e.g. Director).
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS datix_access BOOLEAN NOT NULL DEFAULT FALSE`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS datix_role TEXT`;
   await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ`;
   // Accounts that were already inactive before this column existed start
   // their retention clock now.
@@ -988,6 +992,12 @@ async function seed() {
   // two-factor sign-in is cleared (they set it up again at sign-in) and the
   // reset is logged. Remove the variable afterwards.
   const resetEmail = String(Bun.env.MFA_RESET_EMAIL || "").trim().toLowerCase();
+  // First run of Datix access: nobody has it yet, so the main admin gets it
+  // and can then grant it to the other authorised staff.
+  const [{ n: datixHolders }] = await sql`SELECT COUNT(*)::int AS n FROM users WHERE datix_access = TRUE`;
+  if (datixHolders === 0) {
+    await sql`UPDATE users SET datix_access = TRUE WHERE lower(email) = lower(${SEED_ADMIN_EMAIL}) AND active = TRUE`;
+  }
   if (resetEmail) {
     const rows = await sql`
       UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_enabled_at = NULL, totp_last_step = NULL,
@@ -1027,7 +1037,7 @@ async function getAuth(req: Request): Promise<any> {
   // A half-way sign-in token (password checked, code not yet) is never a session.
   if (payload.purpose) return null;
   const [user] = await sql`
-    SELECT id, name, email, role, active, tokens_valid_after, totp_enabled_at FROM users WHERE id = ${payload.sub}
+    SELECT id, name, email, role, active, tokens_valid_after, totp_enabled_at, datix_access FROM users WHERE id = ${payload.sub}
   `;
   if (!user || !user.active) return null;
   // While two-factor sign-in is required, sessions for accounts that haven't
@@ -1037,7 +1047,7 @@ async function getAuth(req: Request): Promise<any> {
     return null;
   }
   // Use current DB values, not the (possibly stale) values baked into the token.
-  return { ...payload, sub: user.id, name: user.name, email: user.email, role: user.role };
+  return { ...payload, sub: user.id, name: user.name, email: user.email, role: user.role, datixAccess: !!user.datix_access };
 }
 
 // =====================================================================
@@ -1146,7 +1156,7 @@ async function readMfaToken(token: any, stage: "verify" | "setup"): Promise<any>
   return user;
 }
 function sessionResponse(user: any, extra: Record<string, any> = {}) {
-  return json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role }, ...extra });
+  return json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, datixAccess: !!user.datix_access }, ...extra });
 }
 function mfaLocked(userId: number) {
   return recentAttempts(`mfa:${userId}`, MFA_WINDOW_MS).length >= MFA_MAX_FAILS;
@@ -2580,6 +2590,8 @@ function serializeStaff(row: any) {
     role: row.role,
     active: row.active,
     mfaEnabled: row.totp_enabled_at !== undefined ? !!row.totp_enabled_at : undefined,
+    datixAccess: row.datix_access !== undefined ? !!row.datix_access : undefined,
+    datixRole: row.datix_role ?? null,
   };
 }
 
@@ -2657,7 +2669,7 @@ async function renderPrivacyPage() {
 <li><strong>If you submit an incident report:</strong> your name, optionally your email address (so we can send you a reference), the vehicle registration, call sign, crew names, CAD reference, the date, time and place of the incident, your description, and any photos you attach. Near-miss reports can be made anonymously.</li>
 <li><strong>People mentioned in a report</strong> (for example patients, members of the public or colleagues): names and details that the reporter or investigating manager records. Reports about clinical care, safeguarding, medication or injuries may include <strong>information about a person's health</strong>, which is special category data.</li>
 <li><strong>If you complete a vehicle daily check:</strong> your name, the vehicle, its mileage, the check results and any defects you describe.</li>
-<li><strong>If you are mentioned in a document we receive from an NHS trust's Datix system</strong> (for example an incident report, feedback or a request for information about an incident involving our crews): whatever the trust has included, which may include names and information about a person's health. We store these documents so we can respond and investigate. We also keep the name and work email of our contact at each trust, if they give them to us.</li>
+<li><strong>If you are mentioned in a document we receive from an NHS trust's Datix system</strong> (for example an incident report, feedback or a request for information about an incident involving our crews): whatever the trust has included, which may include names and information about a person's health. We store these documents so we can respond and investigate, and only four named senior staff can open them. We also keep the name and work email of our contact at each trust, if they give them to us.</li>
 <li><strong>If a drug bag is signed out to you or returned by you:</strong> your name, the bag number, the seal colour, whether it was for an event (and which event) or frontline work, the vehicle and call sign, when it was signed out and returned, and whether any items were used.</li>
 <li><strong>If company equipment is issued to you:</strong> your name, the item, when it was issued and returned, and its condition on return.</li>
 <li><strong>Managers and administrators who use Dynamo:</strong> name, work email, phone number, role, sign-in credentials (stored only as a secure hash), and a record of actions taken on each incident.</li>
@@ -3220,6 +3232,7 @@ async function anonymiseSubject(
       UPDATE users SET name = ${label}, email = ${`anonymised-${userId}@invalid.local`}, phone = NULL,
         password_hash = ${randomHash}, active = FALSE, anonymised_at = now(), tokens_valid_after = now(),
         totp_secret = NULL, totp_pending_secret = NULL, totp_enabled_at = NULL, totp_last_step = NULL, mfa_recovery_hashes = NULL,
+        datix_access = FALSE, datix_role = NULL,
         deactivated_at = COALESCE(deactivated_at, now())
       WHERE id = ${userId}
     `;
@@ -3983,12 +3996,18 @@ async function nextAssetTag(): Promise<string> {
 // and deletion is recorded in datix_events.
 // =====================================================================
 const DATIX_MAX_BYTES = 25 * 1024 * 1024;
+// Opening, editing and deleting Datix documents is limited to authorised
+// staff (company policy: the two directors, Darren Teale and the Clinical
+// Team Manager): at most this many accounts at a time.
+const DATIX_MAX_AUTHORISED = 4;
+const DATIX_ROLES = ["Director", "Clinical Team Manager", "Registered Manager", "Other"];
+const DATIX_NOT_AUTHORISED = "You're not authorised to open Datix documents. Only the authorised staff listed on this page can open them.";
 const DATIX_EXTENSIONS = [
   "pdf", "doc", "docx", "rtf", "odt", "txt", "csv", "xls", "xlsx", "ods", "msg", "eml", "htm", "html",
   "jpg", "jpeg", "png", "gif", "webp", "heic", "tif", "tiff", "zip",
 ];
 
-function serializeDatixDocument(row: any) {
+function serializeDatixDocument(row: any, canOpen = true) {
   return {
     id: row.id,
     fileName: row.file_name,
@@ -3997,7 +4016,9 @@ function serializeDatixDocument(row: any) {
     datixRef: row.datix_ref,
     trustId: row.trust_id ?? null,
     trust: row.trust_name ?? row.trust ?? null,
-    notes: row.notes,
+    // Notes can mention patients, so only authorised staff see them.
+    notes: canOpen ? row.notes : null,
+    hasNotes: !!row.notes,
     incidentId: row.incident_id,
     incidentRef: row.incident_ref ?? null,
     uploadedBy: row.uploaded_by,
@@ -4086,13 +4107,13 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
       LEFT JOIN users u ON u.id = d.uploaded_by
       LEFT JOIN datix_trusts t ON t.id = d.trust_id
       WHERE (${like}::text IS NULL OR d.file_name ILIKE ${like} OR d.datix_ref ILIKE ${like} OR t.name ILIKE ${like}
-          OR t.short_name ILIKE ${like} OR d.notes ILIKE ${like} OR i.ref ILIKE ${like})
+          OR t.short_name ILIKE ${like} OR (${auth.datixAccess} AND d.notes ILIKE ${like}) OR i.ref ILIKE ${like})
         AND (${trustId}::int IS NULL OR (${trustId}::int = -1 AND d.trust_id IS NULL) OR d.trust_id = ${trustId})
         AND (${url.searchParams.get("unlinked") === "1"} = FALSE OR d.incident_id IS NULL)
       ORDER BY d.uploaded_at DESC
       LIMIT 500
     `;
-    return json((rows as any[]).map(serializeDatixDocument));
+    return json((rows as any[]).map((r) => serializeDatixDocument(r, auth.datixAccess)));
   }
 
   // One file per request (the page sends each dropped file separately, so a
@@ -4123,7 +4144,19 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
       RETURNING id
     `;
     await logDatix(row.id, auth, "UPLOADED", `${fileName} uploaded by ${auth.name}`);
-    return json(serializeDatixDocument(await getDatixDocument(row.id)), 201);
+    return json(serializeDatixDocument(await getDatixDocument(row.id), auth.datixAccess), 201);
+  }
+
+  // Who can open Datix documents (shown on the Datix pages).
+  if (path === "/api/datix/authorised" && method === "GET") {
+    const rows = await sql`
+      SELECT id, name, datix_role FROM users WHERE datix_access = TRUE AND active = TRUE ORDER BY name
+    `;
+    return json({
+      max: DATIX_MAX_AUTHORISED,
+      youCanOpen: !!auth.datixAccess,
+      staff: (rows as any[]).map((r) => ({ id: r.id, name: r.name, datixRole: r.datix_role })),
+    });
   }
 
   // ---- NHS trusts ----
@@ -4214,8 +4247,8 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
       ${where}
       ORDER BY d.uploaded_at DESC LIMIT 8
     `;
-    const recent = ((await listSql(sql``)) as any[]).map(serializeDatixDocument);
-    const unlinked = ((await listSql(sql`WHERE d.incident_id IS NULL`)) as any[]).map(serializeDatixDocument);
+    const recent = ((await listSql(sql``)) as any[]).map((r) => serializeDatixDocument(r, auth.datixAccess));
+    const unlinked = ((await listSql(sql`WHERE d.incident_id IS NULL`)) as any[]).map((r) => serializeDatixDocument(r, auth.datixAccess));
     return json({
       generatedAt: new Date().toISOString(),
       totals: {
@@ -4237,6 +4270,10 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
   if (!doc) return json({ error: "Document not found" }, 404);
 
   if (action === "download" && method === "GET") {
+    if (!auth.datixAccess) {
+      await logDatix(id, auth, "OPEN_REFUSED", `${auth.name} tried to open ${doc.file_name} without Datix access`);
+      return json({ error: DATIX_NOT_AUTHORISED }, 403);
+    }
     const downloadUrl = await storagePresign(doc.file_key);
     await logDatix(id, auth, "OPENED", `${doc.file_name} opened by ${auth.name}`);
     return json({ url: downloadUrl, fileName: doc.file_name });
@@ -4248,6 +4285,7 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
   }
 
   if (!action && method === "PUT") {
+    if (!auth.datixAccess) return json({ error: "Only staff with Datix access can change a Datix document." }, 403);
     const body = await req.json().catch(() => ({}));
     const incident = await resolveIncidentRef(body.incidentRef);
     if (incident === "invalid") return json({ error: "No incident has that reference. Check it, or leave it blank." }, 400);
@@ -4264,11 +4302,11 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
       WHERE id = ${id}
     `;
     await logDatix(id, auth, "EDITED", `Details updated by ${auth.name}`);
-    return json(serializeDatixDocument(await getDatixDocument(id)));
+    return json(serializeDatixDocument(await getDatixDocument(id), true));
   }
 
   if (!action && method === "DELETE") {
-    if (!isAdmin(auth)) return json({ error: "Only an admin can delete a Datix document." }, 403);
+    if (!isAdmin(auth) || !auth.datixAccess) return json({ error: "Only an admin with Datix access can delete a Datix document." }, 403);
     try {
       await storageDelete(doc.file_key);
     } catch (err) {
@@ -5702,9 +5740,10 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (path === "/api/auth/me" && method === "GET") {
       const auth = await getAuth(req);
       if (!auth) return json({ error: "Unauthorized" }, 401);
-      const [user] = await sql`SELECT id, name, email, phone, role FROM users WHERE id = ${auth.sub}`;
+      const [user] = await sql`SELECT id, name, email, phone, role, datix_access FROM users WHERE id = ${auth.sub}`;
       if (!user) return json({ error: "Unauthorized" }, 401);
-      return json(user);
+      const { datix_access, ...rest } = user;
+      return json({ ...rest, datixAccess: !!datix_access });
     }
 
     if (path === "/api/me" && method === "PUT") {
@@ -5739,7 +5778,7 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     if (path === "/api/staff" && method === "GET") {
       const auth = await getAuth(req);
       if (!auth) return json({ error: "Unauthorized" }, 401);
-      const rows = await sql`SELECT id, name, email, phone, role, active, totp_enabled_at FROM users ORDER BY name`;
+      const rows = await sql`SELECT id, name, email, phone, role, active, totp_enabled_at, datix_access, datix_role FROM users ORDER BY name`;
       return json(rows.map(serializeStaff));
     }
 
@@ -5858,6 +5897,28 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM users WHERE role = 'ADMIN' AND active = TRUE AND id <> ${id}`;
         if (count === 0) return json({ error: "This is the only active admin. Make someone else an admin first." }, 400);
       }
+      // Datix access: only an admin who has Datix access can change it, and
+      // at most DATIX_MAX_AUTHORISED people may hold it.
+      const [datixBefore] = await sql`SELECT datix_access, datix_role FROM users WHERE id = ${id}`;
+      const wantDatix = body.datixAccess === undefined ? !!datixBefore.datix_access : body.datixAccess === true;
+      const wantDatixRole = body.datixRole === undefined ? datixBefore.datix_role : DATIX_ROLES.includes(body.datixRole) ? body.datixRole : null;
+      const datixChanged = wantDatix !== !!datixBefore.datix_access || (wantDatix && wantDatixRole !== datixBefore.datix_role);
+      if (datixChanged) {
+        if (!isAdmin(auth) || !auth.datixAccess) {
+          return json({ error: "Only an admin who has Datix access can change who can open Datix documents." }, 403);
+        }
+        if (wantDatix && !datixBefore.datix_access) {
+          const [{ n }] = await sql`SELECT COUNT(*)::int AS n FROM users WHERE datix_access = TRUE AND active = TRUE AND id <> ${id}`;
+          if (n >= DATIX_MAX_AUTHORISED) {
+            return json({ error: `Only ${DATIX_MAX_AUTHORISED} people can have Datix access. Remove someone's access first.` }, 400);
+          }
+          if (newActive === false) return json({ error: "An inactive account can't have Datix access." }, 400);
+        }
+        if (!wantDatix && id === auth.sub) {
+          const [{ n }] = await sql`SELECT COUNT(*)::int AS n FROM users WHERE datix_access = TRUE AND active = TRUE AND role = 'ADMIN' AND id <> ${id}`;
+          if (n === 0) return json({ error: "You're the only admin with Datix access. Give another admin access before removing your own." }, 400);
+        }
+      }
       if (body.password) {
         const problem = passwordProblem(body.password, target.email);
         if (problem) return json({ error: problem }, 400);
@@ -5877,13 +5938,24 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
         WHERE id = ${id} RETURNING id, name, email, phone, role, active
       `;
       if (!row) return json({ error: "Not found" }, 404);
+      if (datixChanged) {
+        await sql`UPDATE users SET datix_access = ${wantDatix}, datix_role = ${wantDatix ? wantDatixRole : null} WHERE id = ${id}`;
+        await logGdpr(auth, wantDatix ? "DATIX_ACCESS_GRANTED" : "DATIX_ACCESS_REMOVED",
+          `Staff account #${id} ${wantDatix ? `given Datix access${wantDatixRole ? ` (${wantDatixRole})` : ""}` : "removed from Datix access"}`);
+      }
+      // Deactivating an account removes its Datix access.
+      if (newActive === false && (datixBefore.datix_access || (datixChanged && wantDatix))) {
+        await sql`UPDATE users SET datix_access = FALSE, datix_role = NULL WHERE id = ${id}`;
+        await logGdpr(auth, "DATIX_ACCESS_REMOVED", `Staff account #${id} removed from Datix access (account deactivated)`);
+      }
       if (target.role !== newRole) {
         // A role change ends the person's current sessions so the new role applies at once.
         await sql`UPDATE users SET tokens_valid_after = now() WHERE id = ${id}`;
         await logGdpr(auth, newRole === "ADMIN" ? "ADMIN_GRANTED" : "ADMIN_REMOVED",
           `Staff account #${id} ${newRole === "ADMIN" ? "given" : "removed from"} admin access`);
       }
-      return json(serializeStaff(row));
+      const [fresh] = await sql`SELECT id, name, email, phone, role, active, totp_enabled_at, datix_access, datix_role FROM users WHERE id = ${id}`;
+      return json(serializeStaff(fresh));
     }
 
     if (staffIdMatch && method === "DELETE") {
