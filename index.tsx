@@ -124,7 +124,7 @@ async function snapshotDatabase() {
     "safety_alerts", "safety_alert_acks", "app_settings", "case_notes", "case_note_entries", "gdpr_log",
     "vehicles", "vdi_checks", "vehicle_defects", "assets", "asset_issues",
     "drug_bags", "drug_bag_movements", "drug_bag_events", "med_items", "med_batches", "med_movements",
-    "datix_documents", "datix_events",
+    "datix_documents", "datix_events", "datix_trusts",
   ];
   const out: Record<string, any[]> = {};
   for (const t of tables) out[t] = (await sql.unsafe(`SELECT * FROM ${t}`)) as any[];
@@ -865,6 +865,33 @@ async function ensureSchema() {
     )
   `;
   await sql`CREATE INDEX IF NOT EXISTS datix_documents_uploaded ON datix_documents (uploaded_at DESC)`;
+  // NHS trusts that send us Datix documents (managed list).
+  await sql`
+    CREATE TABLE IF NOT EXISTS datix_trusts (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      short_name TEXT,
+      contact_name TEXT,
+      contact_email TEXT,
+      notes TEXT,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS datix_trusts_name ON datix_trusts (lower(name))`;
+  await sql`ALTER TABLE datix_documents ADD COLUMN IF NOT EXISTS trust_id INTEGER REFERENCES datix_trusts(id) ON DELETE SET NULL`;
+  // Trust names typed in before the list existed become list entries.
+  await sql`
+    INSERT INTO datix_trusts (name)
+    SELECT DISTINCT ON (lower(trim(trust))) trim(trust) FROM datix_documents
+    WHERE trust IS NOT NULL AND trim(trust) <> '' AND trust_id IS NULL
+    ON CONFLICT (lower(name)) DO NOTHING
+  `;
+  await sql`
+    UPDATE datix_documents d SET trust_id = t.id FROM datix_trusts t
+    WHERE d.trust_id IS NULL AND d.trust IS NOT NULL AND lower(trim(d.trust)) = lower(t.name)
+  `;
   // Who uploaded, opened, changed or deleted each document.
   await sql`
     CREATE TABLE IF NOT EXISTS datix_events (
@@ -2630,7 +2657,7 @@ async function renderPrivacyPage() {
 <li><strong>If you submit an incident report:</strong> your name, optionally your email address (so we can send you a reference), the vehicle registration, call sign, crew names, CAD reference, the date, time and place of the incident, your description, and any photos you attach. Near-miss reports can be made anonymously.</li>
 <li><strong>People mentioned in a report</strong> (for example patients, members of the public or colleagues): names and details that the reporter or investigating manager records. Reports about clinical care, safeguarding, medication or injuries may include <strong>information about a person's health</strong>, which is special category data.</li>
 <li><strong>If you complete a vehicle daily check:</strong> your name, the vehicle, its mileage, the check results and any defects you describe.</li>
-<li><strong>If you are mentioned in a document we receive from an NHS trust's Datix system</strong> (for example an incident report, feedback or a request for information about an incident involving our crews): whatever the trust has included, which may include names and information about a person's health. We store these documents so we can respond and investigate.</li>
+<li><strong>If you are mentioned in a document we receive from an NHS trust's Datix system</strong> (for example an incident report, feedback or a request for information about an incident involving our crews): whatever the trust has included, which may include names and information about a person's health. We store these documents so we can respond and investigate. We also keep the name and work email of our contact at each trust, if they give them to us.</li>
 <li><strong>If a drug bag is signed out to you or returned by you:</strong> your name, the bag number, the seal colour, whether it was for an event (and which event) or frontline work, the vehicle and call sign, when it was signed out and returned, and whether any items were used.</li>
 <li><strong>If company equipment is issued to you:</strong> your name, the item, when it was issued and returned, and its condition on return.</li>
 <li><strong>Managers and administrators who use Dynamo:</strong> name, work email, phone number, role, sign-in credentials (stored only as a secure hash), and a record of actions taken on each incident.</li>
@@ -3968,7 +3995,8 @@ function serializeDatixDocument(row: any) {
     contentType: row.content_type,
     fileSize: row.file_size,
     datixRef: row.datix_ref,
-    trust: row.trust,
+    trustId: row.trust_id ?? null,
+    trust: row.trust_name ?? row.trust ?? null,
     notes: row.notes,
     incidentId: row.incident_id,
     incidentRef: row.incident_ref ?? null,
@@ -3996,11 +4024,46 @@ async function resolveIncidentRef(v: any): Promise<number | null | "invalid"> {
   return row ? row.id : "invalid";
 }
 
+function serializeTrust(r: any) {
+  return {
+    id: r.id,
+    name: r.name,
+    shortName: r.short_name,
+    contactName: r.contact_name,
+    contactEmail: r.contact_email,
+    notes: r.notes,
+    active: r.active,
+    documentCount: r.document_count !== undefined ? Number(r.document_count) : undefined,
+    lastReceived: r.last_received ?? null,
+  };
+}
+
+function trustFields(body: any) {
+  const email = cleanText(body.contactEmail, 160);
+  return {
+    name: cleanText(body.name, 160),
+    shortName: cleanText(body.shortName, 40),
+    contactName: cleanText(body.contactName, 120),
+    contactEmail: email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null,
+    notes: cleanText(body.notes, 1000),
+  };
+}
+
+// Accepts a trust id; returns { id, name }, null (none chosen) or "invalid".
+async function resolveTrust(v: any): Promise<{ id: number; name: string } | null | "invalid"> {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  if (!/^\d+$/.test(s)) return "invalid";
+  const [row] = await sql`SELECT id, name FROM datix_trusts WHERE id = ${Number(s)} AND active = TRUE`;
+  return row ? { id: row.id, name: row.name } : "invalid";
+}
+
 async function getDatixDocument(id: number) {
   const [row] = await sql`
-    SELECT d.*, i.ref AS incident_ref, u.name AS uploaded_by_name FROM datix_documents d
+    SELECT d.*, i.ref AS incident_ref, u.name AS uploaded_by_name, t.name AS trust_name FROM datix_documents d
     LEFT JOIN incidents i ON i.id = d.incident_id
     LEFT JOIN users u ON u.id = d.uploaded_by
+    LEFT JOIN datix_trusts t ON t.id = d.trust_id
     WHERE d.id = ${id}
   `;
   return row || null;
@@ -4015,12 +4078,17 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
   if (path === "/api/datix" && method === "GET") {
     const q = String(url.searchParams.get("q") || "").trim();
     const like = q ? `%${q.replace(/[%_\\]/g, "\\$&")}%` : null;
+    const trustParam = url.searchParams.get("trustId");
+    const trustId = trustParam === "none" ? -1 : trustParam ? Number(trustParam) : null;
     const rows = await sql`
-      SELECT d.*, i.ref AS incident_ref, u.name AS uploaded_by_name FROM datix_documents d
+      SELECT d.*, i.ref AS incident_ref, u.name AS uploaded_by_name, t.name AS trust_name FROM datix_documents d
       LEFT JOIN incidents i ON i.id = d.incident_id
       LEFT JOIN users u ON u.id = d.uploaded_by
-      WHERE ${like}::text IS NULL OR d.file_name ILIKE ${like} OR d.datix_ref ILIKE ${like} OR d.trust ILIKE ${like}
-        OR d.notes ILIKE ${like} OR i.ref ILIKE ${like}
+      LEFT JOIN datix_trusts t ON t.id = d.trust_id
+      WHERE (${like}::text IS NULL OR d.file_name ILIKE ${like} OR d.datix_ref ILIKE ${like} OR t.name ILIKE ${like}
+          OR t.short_name ILIKE ${like} OR d.notes ILIKE ${like} OR i.ref ILIKE ${like})
+        AND (${trustId}::int IS NULL OR (${trustId}::int = -1 AND d.trust_id IS NULL) OR d.trust_id = ${trustId})
+        AND (${url.searchParams.get("unlinked") === "1"} = FALSE OR d.incident_id IS NULL)
       ORDER BY d.uploaded_at DESC
       LIMIT 500
     `;
@@ -4042,18 +4110,123 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
     const incident = await resolveIncidentRef(form.get("incidentRef"));
     if (incident === "invalid") return json({ error: "No incident has that reference. Check it, or leave it blank." }, 400);
     const datixRef = cleanText(form.get("datixRef"), 80);
-    const trust = cleanText(form.get("trust"), 160);
+    const trustRes = await resolveTrust(form.get("trustId"));
+    if (trustRes === "invalid") return json({ error: "Choose an NHS trust from the list, or leave it blank." }, 400);
     const notes = cleanText(form.get("notes"), 2000);
     const fileName = String(file.name).slice(0, 180);
     const key = `datix/${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${sanitizeFileName(fileName)}`;
     await s3.file(key).write(await file.arrayBuffer(), { type: file.type || "application/octet-stream" });
     const [row] = await sql`
-      INSERT INTO datix_documents (file_key, file_name, content_type, file_size, datix_ref, trust, notes, incident_id, uploaded_by)
-      VALUES (${key}, ${fileName}, ${file.type || null}, ${file.size}, ${datixRef}, ${trust}, ${notes}, ${incident}, ${auth.sub})
+      INSERT INTO datix_documents (file_key, file_name, content_type, file_size, datix_ref, trust_id, trust, notes, incident_id, uploaded_by)
+      VALUES (${key}, ${fileName}, ${file.type || null}, ${file.size}, ${datixRef}, ${trustRes?.id ?? null}, ${trustRes?.name ?? null},
+        ${notes}, ${incident}, ${auth.sub})
       RETURNING id
     `;
     await logDatix(row.id, auth, "UPLOADED", `${fileName} uploaded by ${auth.name}`);
     return json(serializeDatixDocument(await getDatixDocument(row.id)), 201);
+  }
+
+  // ---- NHS trusts ----
+  if (path === "/api/datix/trusts" && method === "GET") {
+    const all = url.searchParams.get("all") === "1";
+    const rows = await sql`
+      SELECT t.*, COUNT(d.id)::int AS document_count, MAX(d.uploaded_at) AS last_received
+      FROM datix_trusts t LEFT JOIN datix_documents d ON d.trust_id = t.id
+      WHERE ${all} OR t.active = TRUE
+      GROUP BY t.id ORDER BY t.active DESC, lower(t.name)
+    `;
+    return json((rows as any[]).map(serializeTrust));
+  }
+
+  if (path === "/api/datix/trusts" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const f = trustFields(body);
+    if (!f.name) return json({ error: "Enter the trust's name." }, 400);
+    if (body.contactEmail && String(body.contactEmail).trim() && !f.contactEmail) return json({ error: "The contact email doesn't look right." }, 400);
+    const [dupe] = await sql`SELECT id, active FROM datix_trusts WHERE lower(name) = lower(${f.name})`;
+    if (dupe) return json({ error: dupe.active ? "That trust is already on the list." : "That trust is on the list but archived. Edit it to make it active again." }, 400);
+    const [row] = await sql`
+      INSERT INTO datix_trusts (name, short_name, contact_name, contact_email, notes)
+      VALUES (${f.name}, ${f.shortName}, ${f.contactName}, ${f.contactEmail}, ${f.notes})
+      RETURNING *
+    `;
+    await logDatix(null, auth, "TRUST_ADDED", `NHS trust "${f.name}" added by ${auth.name}`);
+    return json(serializeTrust({ ...row, document_count: 0, last_received: null }), 201);
+  }
+
+  const trustMatch = path.match(/^\/api\/datix\/trusts\/(\d+)$/);
+  if (trustMatch && method === "PUT") {
+    const tid = Number(trustMatch[1]);
+    const body = await req.json().catch(() => ({}));
+    const f = trustFields(body);
+    if (!f.name) return json({ error: "Enter the trust's name." }, 400);
+    if (body.contactEmail && String(body.contactEmail).trim() && !f.contactEmail) return json({ error: "The contact email doesn't look right." }, 400);
+    const [dupe] = await sql`SELECT id FROM datix_trusts WHERE lower(name) = lower(${f.name}) AND id <> ${tid}`;
+    if (dupe) return json({ error: "Another trust already has that name." }, 400);
+    const active = body.active === false ? false : true;
+    const [row] = await sql`
+      UPDATE datix_trusts SET name = ${f.name}, short_name = ${f.shortName}, contact_name = ${f.contactName},
+        contact_email = ${f.contactEmail}, notes = ${f.notes}, active = ${active}, updated_at = now()
+      WHERE id = ${tid} RETURNING *
+    `;
+    if (!row) return json({ error: "Trust not found" }, 404);
+    // Keep the stored name on documents in step (used by older search and exports).
+    await sql`UPDATE datix_documents SET trust = ${f.name} WHERE trust_id = ${tid}`;
+    await logDatix(null, auth, "TRUST_EDITED", `NHS trust "${f.name}" ${active ? "updated" : "archived"} by ${auth.name}`);
+    const [counts] = await sql`SELECT COUNT(*)::int AS document_count, MAX(uploaded_at) AS last_received FROM datix_documents WHERE trust_id = ${tid}`;
+    return json(serializeTrust({ ...row, ...counts }));
+  }
+
+  // ---- Dashboard ----
+  if (path === "/api/datix/dashboard" && method === "GET") {
+    const [totals] = await sql`
+      SELECT COUNT(*)::int AS documents,
+        COUNT(*) FILTER (WHERE uploaded_at >= date_trunc('month', now()))::int AS this_month,
+        COUNT(*) FILTER (WHERE uploaded_at >= now() - interval '30 days')::int AS last_30_days,
+        COUNT(*) FILTER (WHERE incident_id IS NULL)::int AS unlinked,
+        COUNT(*) FILTER (WHERE trust_id IS NULL)::int AS no_trust
+      FROM datix_documents
+    `;
+    const trusts = ((await sql`
+      SELECT t.*, COUNT(d.id)::int AS document_count, MAX(d.uploaded_at) AS last_received,
+        COUNT(d.id) FILTER (WHERE d.uploaded_at >= now() - interval '30 days')::int AS last_30_days
+      FROM datix_trusts t LEFT JOIN datix_documents d ON d.trust_id = t.id
+      GROUP BY t.id ORDER BY t.active DESC, lower(t.name)
+    `) as any[]).map((r) => ({ ...serializeTrust(r), last30Days: r.last_30_days }));
+    const wkRows = await sql`
+      SELECT date_trunc('week', uploaded_at)::date AS wk, COUNT(*)::int AS n FROM datix_documents
+      WHERE uploaded_at >= now() - interval '12 weeks' GROUP BY 1
+    `;
+    const wkMap = new Map((wkRows as any[]).map((r) => [toDateStr(r.wk), Number(r.n)]));
+    const monday = new Date();
+    monday.setUTCHours(0, 0, 0, 0);
+    monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+    const weekly: { weekStart: string; count: number }[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(monday.getTime() - i * 7 * 86400000).toISOString().slice(0, 10);
+      weekly.push({ weekStart: d, count: wkMap.get(d) || 0 });
+    }
+    const listSql = (where: any) => sql`
+      SELECT d.*, i.ref AS incident_ref, u.name AS uploaded_by_name, t.name AS trust_name FROM datix_documents d
+      LEFT JOIN incidents i ON i.id = d.incident_id
+      LEFT JOIN users u ON u.id = d.uploaded_by
+      LEFT JOIN datix_trusts t ON t.id = d.trust_id
+      ${where}
+      ORDER BY d.uploaded_at DESC LIMIT 8
+    `;
+    const recent = ((await listSql(sql``)) as any[]).map(serializeDatixDocument);
+    const unlinked = ((await listSql(sql`WHERE d.incident_id IS NULL`)) as any[]).map(serializeDatixDocument);
+    return json({
+      generatedAt: new Date().toISOString(),
+      totals: {
+        documents: totals.documents, thisMonth: totals.this_month, last30Days: totals.last_30_days,
+        unlinked: totals.unlinked, noTrust: totals.no_trust, activeTrusts: trusts.filter((t) => t.active).length,
+      },
+      trusts,
+      weekly,
+      recent,
+      unlinked,
+    });
   }
 
   const m = path.match(/^\/api\/datix\/(\d+)(\/(download|history))?$/);
@@ -4079,9 +4252,15 @@ async function handleDatixRequest(req: Request, url: URL, path: string, method: 
     const incident = await resolveIncidentRef(body.incidentRef);
     if (incident === "invalid") return json({ error: "No incident has that reference. Check it, or leave it blank." }, 400);
     const fileName = cleanText(body.fileName, 180) || doc.file_name;
+    // An archived trust already on the document can stay; new choices must be active.
+    const trustRes = Number(body.trustId) === doc.trust_id && doc.trust_id
+      ? { id: doc.trust_id, name: doc.trust_name }
+      : await resolveTrust(body.trustId);
+    if (trustRes === "invalid") return json({ error: "Choose an NHS trust from the list, or leave it blank." }, 400);
     await sql`
       UPDATE datix_documents SET file_name = ${fileName}, datix_ref = ${cleanText(body.datixRef, 80)},
-        trust = ${cleanText(body.trust, 160)}, notes = ${cleanText(body.notes, 2000)}, incident_id = ${incident}, updated_at = now()
+        trust_id = ${trustRes?.id ?? null}, trust = ${trustRes?.name ?? null}, notes = ${cleanText(body.notes, 2000)},
+        incident_id = ${incident}, updated_at = now()
       WHERE id = ${id}
     `;
     await logDatix(id, auth, "EDITED", `Details updated by ${auth.name}`);

@@ -563,7 +563,11 @@ const api = {
   resetStaffPasswords: (userIds) => request('/staff/reset-password', { method: 'POST', body: { userIds } }),
   getStaffProfile: (id) => request(`/staff/${id}`),
   listIncidents: () => request('/incidents'),
-  listDatix: (q) => request('/datix', { params: { q } }),
+  listDatix: (params) => request('/datix', { params }),
+  getDatixDashboard: () => request('/datix/dashboard'),
+  listDatixTrusts: (all) => request('/datix/trusts', { params: { all: all ? 1 : undefined } }),
+  createDatixTrust: (data) => request('/datix/trusts', { method: 'POST', body: data }),
+  updateDatixTrust: (id, data) => request(`/datix/trusts/${id}`, { method: 'PUT', body: data }),
   uploadDatix: (formData) => uploadRequest('/datix', formData),
   updateDatix: (id, data) => request(`/datix/${id}`, { method: 'PUT', body: data }),
   deleteDatix: (id) => request(`/datix/${id}`, { method: 'DELETE' }),
@@ -795,6 +799,7 @@ function buildNav(isAdmin) {
   }
   if (isAdmin) {
     nav.push({ section: 'DATIX', items: [
+      { to: '/datix-dashboard', label: 'Datix Dashboard', icon: '📈' },
       { to: '/datix', label: 'Datix Documents', icon: '📥' },
     ] });
   }
@@ -2747,8 +2752,13 @@ function DatixDocuments() {
   const [error, setError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [queue, setQueue] = useState([]); // [{ file, status: 'waiting'|'uploading'|'done'|'error', message }]
+  const location = useLocation();
+  const initialParams = new URLSearchParams(location.search);
   const [datixRef, setDatixRef] = useState('');
-  const [trust, setTrust] = useState('');
+  const [trustId, setTrustId] = useState('');
+  const [trusts, setTrusts] = useState([]);
+  const [filterTrust, setFilterTrust] = useState(initialParams.get('trust') || '');
+  const [filterUnlinked, setFilterUnlinked] = useState(initialParams.get('unlinked') === '1');
   const [incidentRef, setIncidentRef] = useState('');
   const [notes, setNotes] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -2760,18 +2770,22 @@ function DatixDocuments() {
 
   function load(q = search) {
     setLoading(true);
-    return api.listDatix(q).then(setDocs).catch((err) => setError(err.message || 'Could not load documents')).finally(() => setLoading(false));
+    return api.listDatix({ q, trustId: filterTrust || undefined, unlinked: filterUnlinked ? 1 : undefined })
+      .then(setDocs).catch((err) => setError(err.message || 'Could not load documents')).finally(() => setLoading(false));
+  }
+  function loadTrusts() {
+    return api.listDatixTrusts(true).then(setTrusts).catch(() => {});
   }
 
   useEffect(() => {
-    load('');
+    loadTrusts();
     api.listIncidents().then((rows) => setIncidentRefs(rows.map((r) => r.ref))).catch(() => {});
   }, []);
 
   useEffect(() => {
     const t = setTimeout(() => load(search), 300);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [search, filterTrust, filterUnlinked]);
 
   function addFiles(fileList) {
     const files = Array.from(fileList || []);
@@ -2809,7 +2823,7 @@ function DatixDocuments() {
         const fd = new FormData();
         fd.append('file', items[i].file);
         if (datixRef.trim()) fd.append('datixRef', datixRef.trim());
-        if (trust.trim()) fd.append('trust', trust.trim());
+        if (trustId) fd.append('trustId', trustId);
         if (incidentRef.trim()) fd.append('incidentRef', incidentRef.trim());
         if (notes.trim()) fd.append('notes', notes.trim());
         await api.uploadDatix(fd);
@@ -2821,7 +2835,7 @@ function DatixDocuments() {
     }
     setUploading(false);
     if (items.every((q) => q.status === 'done')) {
-      setDatixRef(''); setTrust(''); setIncidentRef(''); setNotes('');
+      setDatixRef(''); setTrustId(''); setIncidentRef(''); setNotes('');
       setTimeout(() => setQueue((prev) => prev.filter((q) => q.status !== 'done')), 2500);
     }
     load();
@@ -2912,7 +2926,8 @@ function DatixDocuments() {
               </div>
               <div className="form-field">
                 <label>NHS trust (optional)</label>
-                <input value={trust} onChange={(e) => setTrust(e.target.value)} placeholder="e.g. Leeds Teaching Hospitals" />
+                <DatixTrustSelect value={trustId} onChange={setTrustId} trusts={trusts}
+                  onAdded={(t) => { loadTrusts(); setTrustId(String(t.id)); }} />
               </div>
               <div className="form-field">
                 <label>Link to Dynamo incident (optional)</label>
@@ -2936,15 +2951,24 @@ function DatixDocuments() {
       </div>
 
       <div className="card table-card">
-        <div style={{ padding: '12px 16px', display: 'flex', gap: 12, alignItems: 'center' }}>
-          <input style={{ flex: 1, maxWidth: 420 }} value={search} onChange={(e) => setSearch(e.target.value)}
+        <div style={{ padding: '12px 16px', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input style={{ flex: 1, minWidth: 220, maxWidth: 380 }} value={search} onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by file name, Datix ref, trust, notes or incident ref" />
+          <select value={filterTrust} onChange={(e) => setFilterTrust(e.target.value)} style={{ maxWidth: 260 }} aria-label="Filter by NHS trust">
+            <option value="">All NHS trusts</option>
+            {trusts.map((t) => <option key={t.id} value={t.id}>{t.name}{t.active ? '' : ' (archived)'}</option>)}
+            <option value="none">No trust recorded</option>
+          </select>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, whiteSpace: 'nowrap' }}>
+            <input type="checkbox" checked={filterUnlinked} onChange={(e) => setFilterUnlinked(e.target.checked)} style={{ width: 'auto' }} />
+            Not linked to an incident
+          </label>
           <span className="muted" style={{ fontSize: 13 }}>{docs.length} document{docs.length === 1 ? '' : 's'}</span>
         </div>
         {loading && docs.length === 0 ? (
           <div className="empty">Loading…</div>
         ) : docs.length === 0 ? (
-          <div className="empty">{search ? 'No documents match your search.' : 'No Datix documents yet. Drag files into the box above.'}</div>
+          <div className="empty">{search || filterTrust || filterUnlinked ? 'No documents match.' : 'No Datix documents yet. Drag files into the box above.'}</div>
         ) : (
           <table className="table">
             <thead>
@@ -2985,7 +3009,7 @@ function DatixDocuments() {
       </div>
 
       {editing && (
-        <DatixEditModal doc={editing} incidentRefs={incidentRefs} onClose={() => setEditing(null)}
+        <DatixEditModal doc={editing} incidentRefs={incidentRefs} trusts={trusts} onTrustAdded={loadTrusts} onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }} />
       )}
       {historyFor && <DatixHistoryModal doc={historyFor} onClose={() => setHistoryFor(null)} />}
@@ -2993,10 +3017,285 @@ function DatixDocuments() {
   );
 }
 
-function DatixEditModal({ doc, incidentRefs, onClose, onSaved }) {
+// Dropdown of active NHS trusts, with "+ Add a new NHS trust…" at the end.
+// keepId keeps an archived trust selectable when it's already on a document.
+function DatixTrustSelect({ value, onChange, trusts, onAdded, keepId }) {
+  const [adding, setAdding] = useState(false);
+  const options = trusts.filter((t) => t.active || String(t.id) === String(keepId));
+  return (
+    <>
+      <select value={value} onChange={(e) => {
+        if (e.target.value === '__add') { setAdding(true); return; }
+        onChange(e.target.value);
+      }}>
+        <option value="">— None —</option>
+        {options.map((t) => <option key={t.id} value={t.id}>{t.name}{t.active ? '' : ' (archived)'}</option>)}
+        <option value="__add">+ Add a new NHS trust…</option>
+      </select>
+      {adding && (
+        <DatixTrustModal onClose={() => setAdding(false)} onSaved={(t) => { setAdding(false); onAdded && onAdded(t); }} />
+      )}
+    </>
+  );
+}
+
+function DatixTrustModal({ trust, onClose, onSaved }) {
+  const isEdit = !!trust;
+  const [name, setName] = useState(trust?.name || '');
+  const [shortName, setShortName] = useState(trust?.shortName || '');
+  const [contactName, setContactName] = useState(trust?.contactName || '');
+  const [contactEmail, setContactEmail] = useState(trust?.contactEmail || '');
+  const [notes, setNotes] = useState(trust?.notes || '');
+  const [active, setActive] = useState(trust ? !!trust.active : true);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  // Not a <form>: this window can open inside another form (Edit document),
+  // and nested forms submit the outer one. Enter is handled here instead.
+  async function handleSubmit(e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    if (!name.trim()) { setError("Enter the trust's name."); return; }
+    setError('');
+    setBusy(true);
+    try {
+      const data = { name, shortName, contactName, contactEmail, notes, active };
+      const saved = isEdit ? await api.updateDatixTrust(trust.id, data) : await api.createDatixTrust(data);
+      onSaved(saved);
+    } catch (err) {
+      setError(err.message || 'Could not save the trust');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => { e.stopPropagation(); onClose(); }} style={{ zIndex: 1100 }}>
+      <div className="modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') handleSubmit(e);
+          if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
+        }}>
+        <div className="modal-header">
+          <h2>{isEdit ? `Edit ${trust.name}` : 'Add an NHS trust'}</h2>
+          <button type="button" className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field form-field-wide">
+            <label>Trust name</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} required autoFocus
+              placeholder="e.g. Leeds Teaching Hospitals NHS Trust" />
+          </div>
+          <div className="form-field">
+            <label>Short name (optional)</label>
+            <input value={shortName} onChange={(e) => setShortName(e.target.value)} placeholder="e.g. LTHT" />
+          </div>
+          {isEdit && (
+            <div className="form-field">
+              <label>Status</label>
+              <select value={active ? 'active' : 'archived'} onChange={(e) => setActive(e.target.value === 'active')}>
+                <option value="active">Active</option>
+                <option value="archived">Archived (hidden from new uploads)</option>
+              </select>
+            </div>
+          )}
+          <div className="form-field">
+            <label>Datix contact name (optional)</label>
+            <input value={contactName} onChange={(e) => setContactName(e.target.value)} />
+          </div>
+          <div className="form-field">
+            <label>Contact email (optional)</label>
+            <input type="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} placeholder="name@nhs.net" />
+          </div>
+          <div className="form-field form-field-wide">
+            <label>Notes (optional)</label>
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. Datix team, how they send documents" />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <div />
+          <div className="modal-footer-right">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={handleSubmit}>{busy ? 'Saving…' : isEdit ? 'Save' : 'Add trust'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DatixDashboard() {
+  const [d, setD] = useState(null);
+  const [error, setError] = useState('');
+  const [editingTrust, setEditingTrust] = useState(null); // trust object, 'new', or null
+  const [showArchived, setShowArchived] = useState(false);
+  const navigate = useNavigate();
+
+  function load() {
+    setError('');
+    api.getDatixDashboard().then(setD).catch((err) => setError(err.message || 'Failed to load the Datix dashboard'));
+  }
+  useEffect(() => { load(); }, []);
+
+  if (error) return <div className="error-banner">{error}</div>;
+  if (!d) return <div className="page-loading">Loading…</div>;
+
+  const t = d.totals;
+  const short = (x) => (x ? new Date(x).toLocaleDateString('en-GB') : '—');
+  const goDocs = (qs = '') => navigate('/datix' + qs);
+  const activeTrusts = d.trusts.filter((tr) => tr.active);
+  const byTrust = activeTrusts.filter((tr) => tr.documentCount > 0).sort((a, b) => b.documentCount - a.documentCount);
+  const maxCount = Math.max(1, ...byTrust.map((tr) => tr.documentCount), t.noTrust);
+  const shownTrusts = showArchived ? d.trusts : activeTrusts;
+
+  const docRow = (doc) => (
+    <>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{datixFileIcon(doc.fileName)} {doc.fileName}</div>
+        <div className="muted" style={{ fontSize: 12 }}>
+          {[doc.trust, doc.datixRef].filter(Boolean).join(' · ') || 'No trust recorded'}
+        </div>
+      </div>
+      <div style={{ textAlign: 'right', fontSize: 12, whiteSpace: 'nowrap' }}>{short(doc.uploadedAt)}</div>
+    </>
+  );
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Datix Dashboard</h1>
+          <div className="page-sub">Documents from NHS trusts' Datix systems · updated {fmtTime(d.generatedAt)}</div>
+        </div>
+        <div className="page-header-actions">
+          <button className="btn btn-ghost" onClick={load}>Refresh</button>
+          <button className="btn btn-ghost" onClick={() => setEditingTrust('new')}>+ Add NHS trust</button>
+          <button className="btn btn-primary" onClick={() => goDocs()}>Upload documents</button>
+        </div>
+      </div>
+
+      <div className="kpi-grid">
+        <div className="kpi-card row-clickable" onClick={() => goDocs()}>
+          <div className="kpi-value">{t.documents}</div>
+          <div className="kpi-label">Datix documents</div>
+          <div className="kpi-sub">{t.last30Days} in the last 30 days</div>
+        </div>
+        <div className="kpi-card row-clickable" onClick={() => goDocs()}>
+          <div className="kpi-value">{t.thisMonth}</div>
+          <div className="kpi-label">Received this month</div>
+          <div className="kpi-sub">Since 1 {new Date().toLocaleDateString('en-GB', { month: 'long' })}</div>
+        </div>
+        <div className={'kpi-card row-clickable ' + (t.unlinked ? 'kpi-card-amber' : 'kpi-card-green')} onClick={() => goDocs('?unlinked=1')}>
+          <div className="kpi-value">{t.unlinked}</div>
+          <div className="kpi-label">Not linked to an incident</div>
+          <div className="kpi-sub">Link each to its Dynamo incident</div>
+        </div>
+        <div className="kpi-card row-clickable" onClick={() => document.getElementById('datix-trusts')?.scrollIntoView({ behavior: 'smooth' })}>
+          <div className="kpi-value">{t.activeTrusts}</div>
+          <div className="kpi-label">NHS trusts</div>
+          <div className="kpi-sub">{t.noTrust} document{t.noTrust === 1 ? '' : 's'} with no trust</div>
+        </div>
+      </div>
+
+      <div className="kpi-panels" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))' }}>
+        <div className="card">
+          <div className="kpi-panel-header">
+            <div className="kpi-panel-title">Documents received per week</div>
+            <div className="muted">Last 12 weeks</div>
+          </div>
+          <TrendChart weeks={d.weekly} color="#2563eb" noun="document" ariaLabel="Datix documents received per week, last 12 weeks" />
+        </div>
+        <MedPanel title="Documents by NHS trust" sub="All time · click to see them">
+          {byTrust.length === 0 && !t.noTrust ? <div className="empty">No documents yet.</div> : (
+            <>
+              {byTrust.map((tr) => (
+                <div key={tr.id} className="row-clickable" onClick={() => goDocs(`?trust=${tr.id}`)}>
+                  <DashBarRow label={tr.shortName || tr.name} count={tr.documentCount} max={maxCount} color="#2563eb" />
+                </div>
+              ))}
+              {t.noTrust > 0 && (
+                <div className="row-clickable" onClick={() => goDocs('?trust=none')}>
+                  <DashBarRow label="No trust recorded" count={t.noTrust} max={maxCount} color="#9ca3af" />
+                </div>
+              )}
+            </>
+          )}
+        </MedPanel>
+      </div>
+
+      <div className="kpi-panels">
+        <MedPanel title="Recently received" action={<button className="btn btn-ghost btn-sm" onClick={() => goDocs()}>All documents</button>}>
+          <MedActionList rows={d.recent} empty="No documents yet. Upload them on the Datix Documents page." render={docRow} />
+        </MedPanel>
+        <MedPanel title="Not linked to an incident" action={<button className="btn btn-ghost btn-sm" onClick={() => goDocs('?unlinked=1')}>See all</button>}>
+          <MedActionList rows={d.unlinked} empty="Every document is linked to a Dynamo incident." render={docRow} />
+        </MedPanel>
+      </div>
+
+      <div className="card table-card" id="datix-trusts" style={{ marginTop: 20 }}>
+        <div style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div className="kpi-panel-title" style={{ marginRight: 'auto' }}>NHS trusts</div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} style={{ width: 'auto' }} />
+            Show archived
+          </label>
+          <button className="btn btn-primary btn-sm" onClick={() => setEditingTrust('new')}>+ Add NHS trust</button>
+        </div>
+        {shownTrusts.length === 0 ? (
+          <div className="empty">No NHS trusts yet. Click <strong>+ Add NHS trust</strong> to add the trusts that send you Datix documents.</div>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Trust</th>
+                <th>Datix contact</th>
+                <th>Documents</th>
+                <th>Last received</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {shownTrusts.map((tr) => (
+                <tr key={tr.id}>
+                  <td>
+                    <div style={{ fontWeight: 600 }}>{tr.name}</div>
+                    {tr.shortName && <div className="muted" style={{ fontSize: 12 }}>{tr.shortName}</div>}
+                  </td>
+                  <td>
+                    {tr.contactName || '—'}
+                    {tr.contactEmail && <div style={{ fontSize: 12 }}><a href={`mailto:${tr.contactEmail}`}>{tr.contactEmail}</a></div>}
+                  </td>
+                  <td>
+                    {tr.documentCount > 0
+                      ? <a href="#" onClick={(e) => { e.preventDefault(); goDocs(`?trust=${tr.id}`); }}>{tr.documentCount}</a>
+                      : 0}
+                    {tr.last30Days > 0 && <div className="muted" style={{ fontSize: 12 }}>{tr.last30Days} in 30 days</div>}
+                  </td>
+                  <td>{short(tr.lastReceived)}</td>
+                  <td><span className={'badge ' + (tr.active ? 'badge-green' : 'badge-grey')}>{tr.active ? 'Active' : 'Archived'}</span></td>
+                  <td className="actions-cell">
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditingTrust(tr)}>Edit</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {editingTrust && (
+        <DatixTrustModal trust={editingTrust === 'new' ? null : editingTrust} onClose={() => setEditingTrust(null)}
+          onSaved={() => { setEditingTrust(null); load(); }} />
+      )}
+    </div>
+  );
+}
+
+function DatixEditModal({ doc, incidentRefs, trusts, onTrustAdded, onClose, onSaved }) {
   const [fileName, setFileName] = useState(doc.fileName || '');
   const [datixRef, setDatixRef] = useState(doc.datixRef || '');
-  const [trust, setTrust] = useState(doc.trust || '');
+  const [trustId, setTrustId] = useState(doc.trustId ? String(doc.trustId) : '');
   const [incidentRef, setIncidentRef] = useState(doc.incidentRef || '');
   const [notes, setNotes] = useState(doc.notes || '');
   const [error, setError] = useState('');
@@ -3007,7 +3306,7 @@ function DatixEditModal({ doc, incidentRefs, onClose, onSaved }) {
     setError('');
     setBusy(true);
     try {
-      await api.updateDatix(doc.id, { fileName, datixRef, trust, incidentRef, notes });
+      await api.updateDatix(doc.id, { fileName, datixRef, trustId, incidentRef, notes });
       onSaved();
     } catch (err) {
       setError(err.message || 'Could not save');
@@ -3035,7 +3334,8 @@ function DatixEditModal({ doc, incidentRefs, onClose, onSaved }) {
           </div>
           <div className="form-field">
             <label>NHS trust</label>
-            <input value={trust} onChange={(e) => setTrust(e.target.value)} />
+            <DatixTrustSelect value={trustId} onChange={setTrustId} trusts={trusts} keepId={doc.trustId}
+              onAdded={(t) => { onTrustAdded && onTrustAdded(); setTrustId(String(t.id)); }} />
           </div>
           <div className="form-field form-field-wide">
             <label>Linked Dynamo incident</label>
@@ -4599,7 +4899,7 @@ function TrendChart({ weeks, color = '#2563eb', noun = 'incident', ariaLabel = '
           <circle cx={p.x} cy={p.y} r={i === points.length - 1 ? 5 : 3.5} fill={color} stroke="#fff" strokeWidth="2" />
           <title>{`Week of ${shortDate(new Date(p.weekStart))}: ${p.count} ${noun}${p.count === 1 ? '' : 's'}`}</title>
           {i === points.length - 1 && (
-            <text x={p.x} y={p.y - 12} textAnchor="end" fontSize="12" fontWeight="700" fill="#111827">{p.count}</text>
+            <text x={p.x - 8} y={Math.max(12, p.y - 10)} textAnchor="end" fontSize="12" fontWeight="700" fill="#111827">{p.count}</text>
           )}
           {(i % 2 === 0 || i === points.length - 1) && (
             <text x={p.x} y={height - 6} textAnchor="middle" fontSize="10" fill="#6b7280">{shortDate(new Date(p.weekStart))}</text>
@@ -7977,6 +8277,7 @@ function AppRoutes() {
                 <Route path="/staff" element={<AdminRoute><Staff /></AdminRoute>} />
                 <Route path="/case-notes" element={<AdminRoute><CaseNotes /></AdminRoute>} />
                 <Route path="/datix" element={<AdminRoute><DatixDocuments /></AdminRoute>} />
+                <Route path="/datix-dashboard" element={<AdminRoute><DatixDashboard /></AdminRoute>} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="*" element={<Navigate to="/dashboard" replace />} />
               </Routes>

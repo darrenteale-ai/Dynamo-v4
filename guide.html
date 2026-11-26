@@ -26,6 +26,7 @@ main { background:var(--card); border:1px solid var(--line); border-radius:14px;
 h2 { font-size:22px; margin:40px 0 10px; padding-top:22px; border-top:1px solid var(--line); }
 main > h2:first-child { border-top:0; margin-top:16px; }
 h3 { font-size:17px; margin:26px 0 6px; }
+h4 { font-size:15px; margin:18px 0 4px; }
 p, li { max-width:72ch; }
 ul, ol { padding-left:22px; } li { margin:3px 0; }
 a { color:var(--blue); }
@@ -106,6 +107,7 @@ hr { display:none; }
 <li><strong>Medication Dashboard</strong> (under Medication) — drug bags and stock at a glance, with action lists and charts.</li>
 <li><strong>Drug Bag Sign In / Sign Out</strong> (under Medication) — sign drug bags out to crews, sign them back in, restock and reseal.</li>
 <li><strong>Medication Store</strong> (under Medication) — stock in hand, expiry dates by batch and minimum quantities.</li>
+<li><strong>Datix Dashboard</strong> (under Datix) — Datix documents at a glance, and the list of NHS trusts.</li>
 <li><strong>Datix Documents</strong> (under Datix) — drag and drop documents you receive from NHS trusts' Datix systems.</li>
 <li><strong>Fleet Management</strong> — vehicles, key dates, daily checks and defects.</li>
 <li><strong>Staff</strong> — manager and admin accounts.</li>
@@ -450,15 +452,30 @@ hr { display:none; }
 <p>The <strong>Datix Documents</strong> page (under <strong>Datix</strong> in the sidebar) is where managers and admins keep documents received from NHS trusts' Datix systems, such as incident reports, feedback and requests for information about our crews.</p>
 <ol>
 <li><strong>Drag and drop</strong> one or more files onto the box at the top, or click the box to choose files. PDF, Word, Excel, Outlook and other emails (.msg / .eml), text, images and zip files are accepted, up to 25 MB each.</li>
-<li>Optionally enter the <strong>Datix reference</strong>, the <strong>NHS trust</strong>, the <strong>Dynamo incident</strong> it relates to (start typing the reference and pick it from the list) and a short note. These details are added to every file in that upload.</li>
+<li>Optionally enter the <strong>Datix reference</strong>, choose the <strong>NHS trust</strong> from the list (or pick <strong>+ Add a new NHS trust…</strong> at the bottom to add one there and then), the <strong>Dynamo incident</strong> it relates to (start typing the reference and pick it from the list) and a short note. These details are added to every file in that upload.</li>
 <li>Click <strong>Upload</strong>. Each file shows Uploaded when it's done; if one fails, the reason is shown next to it and you can remove it or try again.</li>
 </ol>
-<p>Underneath, every document is listed newest first. Use the search box to find documents by file name, Datix reference, trust, notes or incident reference. For each document you can:</p>
+<p>Underneath, every document is listed newest first. Use the search box to find documents by file name, Datix reference, trust (full or short name), notes or incident reference. Use the trust dropdown to show one trust's documents (or those with no trust recorded), and tick <strong>Not linked to an incident</strong> to see documents still to be linked. For each document you can:</p>
 <ul>
 <li><strong>Open</strong> it (it downloads or opens in a new tab);</li>
 <li><strong>Edit</strong> the file name, Datix reference, trust, linked incident and notes;</li>
 <li>see its <strong>History</strong>: who uploaded, opened and edited it, and when;</li>
 <li><strong>Delete</strong> it (admins only). This removes the file permanently.</li>
+</ul>
+<h4>Datix dashboard</h4>
+<p>The <strong>Datix Dashboard</strong> shows:</p>
+<ul>
+<li>tiles for the number of documents, how many arrived this month, how many aren't linked to a Dynamo incident yet, and how many NHS trusts are on the list. Click a tile to open those documents;</li>
+<li>a chart of documents received per week over the last 12 weeks;</li>
+<li><strong>Documents by NHS trust</strong>. Click a trust to see its documents;</li>
+<li>the most recently received documents, and those not yet linked to an incident.</li>
+</ul>
+<h4>NHS trusts</h4>
+<p>The <strong>NHS trusts</strong> list is at the bottom of the dashboard. Click <strong>+ Add NHS trust</strong> to add a trust: enter its full name and, if you like, a short name (for example LTHT), your Datix contact there and their email, and notes. Each trust shows how many documents you've had from it and when the last one arrived.</p>
+<ul>
+<li>Click <strong>Edit</strong> to change a trust's details. Renaming a trust updates all its documents.</li>
+<li>To stop using a trust, edit it and set the status to <strong>Archived</strong>. It disappears from the dropdowns for new uploads but its documents keep it. Tick <strong>Show archived</strong> to see archived trusts and make one active again.</li>
+<li>Each trust can only be on the list once.</li>
 </ul>
 <p>These documents often contain patient information. Only open them when you need to, don't download copies you don't need, and never forward them outside the company. Datix documents are included in the data protection tools (section 10).</p>
 <h3 id="sec-fleet-management">Fleet management</h3>
