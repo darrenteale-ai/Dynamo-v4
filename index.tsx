@@ -124,7 +124,7 @@ async function snapshotDatabase() {
     "safety_alerts", "safety_alert_acks", "app_settings", "case_notes", "case_note_entries", "gdpr_log",
     "vehicles", "vdi_checks", "vehicle_defects", "assets", "asset_issues",
     "drug_bags", "drug_bag_movements", "drug_bag_events", "med_items", "med_batches", "med_movements",
-    "meetings", "meeting_actions",
+    "meetings", "meeting_actions", "cd_drugs", "cd_entries",
     "datix_documents", "datix_events", "datix_trusts",
   ];
   const out: Record<string, any[]> = {};
@@ -913,6 +913,60 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+
+  // ---- Controlled drugs register ----
+  await sql`
+    CREATE TABLE IF NOT EXISTS cd_drugs (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      form TEXT NOT NULL,
+      strength TEXT NOT NULL,
+      schedule TEXT NOT NULL,
+      unit TEXT NOT NULL DEFAULT 'units',
+      location TEXT NOT NULL,
+      min_qty INTEGER NOT NULL DEFAULT 0,
+      balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS cd_entries (
+      id SERIAL PRIMARY KEY,
+      drug_id INTEGER NOT NULL REFERENCES cd_drugs(id) ON DELETE RESTRICT,
+      type TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      occurred_at TIMESTAMPTZ NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      late_reason TEXT,
+      supplier TEXT, supplier_address TEXT, reference TEXT, batch TEXT, expiry_date DATE,
+      patient_ref TEXT, administered_by TEXT, issued_to TEXT, reason TEXT, notes TEXT,
+      counted_qty INTEGER, expected_qty INTEGER, discrepancy BOOLEAN NOT NULL DEFAULT FALSE,
+      incident_id INTEGER REFERENCES incidents(id) ON DELETE SET NULL,
+      corrects_entry_id INTEGER REFERENCES cd_entries(id) ON DELETE RESTRICT,
+      recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      witness_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      witness_name TEXT, witness_role TEXT, witness_verified BOOLEAN NOT NULL DEFAULT FALSE,
+      authorised_witness_name TEXT, authorised_witness_role TEXT, authorisation TEXT
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS cd_entries_drug ON cd_entries (drug_id, occurred_at, id)`;
+  // The register can't be altered: block UPDATE (except linking an incident)
+  // and DELETE at database level.
+  await sql`
+    CREATE OR REPLACE FUNCTION cd_entries_protect() RETURNS trigger AS $$
+    BEGIN
+      IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'Controlled drug register entries cannot be deleted'; END IF;
+      IF (to_jsonb(NEW) - 'incident_id') IS DISTINCT FROM (to_jsonb(OLD) - 'incident_id') THEN
+        RAISE EXCEPTION 'Controlled drug register entries cannot be changed; add a correction entry';
+      END IF;
+      RETURN NEW;
+    END $$ LANGUAGE plpgsql
+  `;
+  await sql`DROP TRIGGER IF EXISTS cd_entries_protect ON cd_entries`;
+  await sql`CREATE TRIGGER cd_entries_protect BEFORE UPDATE OR DELETE ON cd_entries FOR EACH ROW EXECUTE FUNCTION cd_entries_protect()`;
 
   // ---- Managers' meetings (daily / weekly) ----
   await sql`
@@ -2712,6 +2766,7 @@ async function renderPrivacyPage() {
 <li><strong>People mentioned in a report</strong> (for example patients, members of the public or colleagues): names and details that the reporter or investigating manager records. Reports about clinical care, safeguarding, medication or injuries may include <strong>information about a person's health</strong>, which is special category data.</li>
 <li><strong>If you complete a vehicle daily check:</strong> your name, the vehicle, its mileage, the check results and any defects you describe.</li>
 <li><strong>If you are mentioned in a document we receive from an NHS trust's Datix system</strong> (for example an incident report, feedback or a request for information about an incident involving our crews): whatever the trust has included, which may include names and information about a person's health. We store these documents so we can respond and investigate, and only four named senior staff can open them. We also keep the name and work email of our contact at each trust, if they give them to us.</li>
+<li><strong>If you make or witness a controlled drug register entry, or are named in one:</strong> your name, your role, the drug, quantity, date and time, and the patient record reference. We keep this because the Misuse of Drugs Regulations 2001 require a controlled drugs register.</li>
 <li><strong>If a drug bag is signed out to you or returned by you:</strong> your name, the bag number, the seal colour, whether it was for an event (and which event) or frontline work, the vehicle and call sign, when it was signed out and returned, and whether any items were used.</li>
 <li><strong>If company equipment is issued to you:</strong> your name, the item, when it was issued and returned, and its condition on return.</li>
 <li><strong>Managers and administrators who use Dynamo:</strong> name, work email, phone number, role, sign-in credentials (stored only as a secure hash), and a record of actions taken on each incident.</li>
@@ -2734,6 +2789,7 @@ async function renderPrivacyPage() {
 <li>Case notes: ${monthsLabel(r.caseNoteMonths, "in line with our records retention schedule")} after the last entry.</li>
 <li>Staff accounts: until ${monthsLabel(r.inactiveStaffMonths, "a reasonable period")} after the account is closed, then anonymised.</li>
 <li>Vehicle daily checks: ${monthsLabel(r.vdiMonths, "in line with our records retention schedule")} after the check, unless a defect from it is still open.</li>
+<li>Controlled drugs register entries: at least 2 years from the last entry in that register section, as the Misuse of Drugs Regulations 2001 require. Register entries can't be changed or anonymised, because the register must stay complete; this is a legal obligation (UK GDPR Article 6(1)(c)).</li>
 <li>Drug bag and medication stock records: ${monthsLabel(r.medMonths, "in line with our records retention schedule (at least 2 years)")} after the bag is returned or the stock movement is made, after which names and notes are removed. Bag numbers, dates and quantities are kept for medicines accountability.</li>
 <li>Documents received from NHS trusts' Datix systems: ${monthsLabel(r.datixMonths, "in line with our records retention schedule (at least 3 years)")} after they are uploaded, then deleted.</li>
 <li>Equipment issue records: for as long as the item is held by the company, so that we can account for it; you can ask for your name to be removed once the item is returned.</li>
@@ -3133,6 +3189,15 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
         ORDER BY d.uploaded_at ASC
       `
     : [];
+  const controlledDrugEntries = await sql`
+    SELECT e.id, d.name AS drug, d.strength, d.form, d.location, e.type, e.quantity, e.occurred_at, e.administered_by, e.issued_to,
+      e.witness_name, e.authorised_witness_name, e.reason, e.notes
+    FROM cd_entries e JOIN cd_drugs d ON d.id = e.drug_id
+    WHERE e.recorded_by = ${userId} OR e.witness_user_id = ${userId}
+      OR e.administered_by ILIKE ${like} OR e.issued_to ILIKE ${like} OR e.witness_name ILIKE ${like}
+      OR e.authorised_witness_name ILIKE ${like} OR e.reason ILIKE ${like} OR e.notes ILIKE ${like}
+    ORDER BY e.occurred_at
+  `;
   const meetingMentions = subject.name
     ? await sql`
         SELECT id, type, meeting_date, chair, attendees, apologies, notes FROM meetings
@@ -3190,6 +3255,7 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
     equipmentIssued,
     drugBagMovements,
     meetingMentions,
+    controlledDrugEntries,
     meetingActions,
     // Datix documents are only shown to admins with Datix access; others get
     // the number of matches and who to ask.
@@ -5344,6 +5410,326 @@ async function meetingActionRows(where: { meetingId?: number; openOnly?: boolean
   `;
 }
 
+// =====================================================================
+// Controlled drugs register (Misuse of Drugs Regulations 2001, reg. 19-20).
+// One section per drug / form / strength at each location, entries in
+// chronological order with a running balance. Entries are never edited
+// or deleted: mistakes are put right with a CORRECTION entry that refers
+// to the original. Every entry has a witness (a second Dynamo user who
+// confirms with their password, or a named witness). Destruction needs an
+// authorised witness. A stock check that doesn't match the register raises
+// a high-severity incident instead of changing the balance.
+// =====================================================================
+
+const CD_ENTRY_TYPES: Record<string, { label: string; sign: 1 | -1 | 0 }> = {
+  OPENING: { label: "Opening balance", sign: 1 },
+  RECEIVED: { label: "Received", sign: 1 },
+  ADMINISTERED: { label: "Administered to patient", sign: -1 },
+  ISSUED: { label: "Issued", sign: -1 },
+  RETURNED: { label: "Returned to stock", sign: 1 },
+  DESTROYED: { label: "Destroyed", sign: -1 },
+  STOCK_CHECK: { label: "Stock check", sign: 0 },
+  CORRECTION: { label: "Correction", sign: 0 },
+};
+const CD_SCHEDULES = ["2", "3", "4", "5"];
+const CD_STOCK_CHECK_DAYS = 7;
+
+function serializeCdDrug(row: any) {
+  const last = row.last_check_at ? new Date(row.last_check_at) : null;
+  const checkOverdue = !last || Date.now() - last.getTime() > CD_STOCK_CHECK_DAYS * 86400000;
+  return {
+    id: row.id,
+    name: row.name,
+    form: row.form,
+    strength: row.strength,
+    schedule: row.schedule,
+    unit: row.unit,
+    location: row.location,
+    minQty: Number(row.min_qty || 0),
+    active: row.active,
+    balance: Number(row.balance || 0),
+    entryCount: Number(row.entry_count || 0),
+    lastCheckAt: row.last_check_at,
+    lastCheckOk: row.last_check_ok,
+    checkOverdue,
+    openDiscrepancies: Number(row.open_discrepancies || 0),
+    belowMin: Number(row.balance || 0) < Number(row.min_qty || 0),
+    createdAt: row.created_at,
+  };
+}
+
+async function cdDrugRows(id: number | null, includeArchived: boolean) {
+  return await sql`
+    SELECT d.*,
+      (SELECT COUNT(*) FROM cd_entries e WHERE e.drug_id = d.id) AS entry_count,
+      (SELECT MAX(e.occurred_at) FROM cd_entries e WHERE e.drug_id = d.id AND e.type = 'STOCK_CHECK') AS last_check_at,
+      (SELECT NOT e.discrepancy FROM cd_entries e WHERE e.drug_id = d.id AND e.type = 'STOCK_CHECK' ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1) AS last_check_ok,
+      (SELECT COUNT(*) FROM cd_entries e WHERE e.drug_id = d.id AND e.discrepancy AND NOT EXISTS
+        (SELECT 1 FROM cd_entries c WHERE c.drug_id = d.id AND c.type = 'STOCK_CHECK' AND NOT c.discrepancy AND c.id > e.id)) AS open_discrepancies
+    FROM cd_drugs d
+    WHERE (${id}::int IS NULL OR d.id = ${id}) AND (${includeArchived} OR d.active OR ${id}::int IS NOT NULL)
+    ORDER BY d.active DESC, lower(d.location) NULLS FIRST, lower(d.name), d.strength
+  `;
+}
+
+function serializeCdEntry(row: any) {
+  return {
+    id: row.id,
+    drugId: row.drug_id,
+    type: row.type,
+    typeLabel: CD_ENTRY_TYPES[row.type]?.label || row.type,
+    quantity: row.quantity,
+    balanceAfter: row.balance_after,
+    occurredAt: row.occurred_at,
+    recordedAt: row.recorded_at,
+    lateReason: row.late_reason,
+    supplier: row.supplier,
+    supplierAddress: row.supplier_address,
+    reference: row.reference,
+    batch: row.batch,
+    expiryDate: toDateStr(row.expiry_date),
+    patientRef: row.patient_ref,
+    administeredBy: row.administered_by,
+    issuedTo: row.issued_to,
+    reason: row.reason,
+    notes: row.notes,
+    countedQty: row.counted_qty,
+    expectedQty: row.expected_qty,
+    discrepancy: row.discrepancy,
+    incidentId: row.incident_id,
+    incidentRef: row.incident_ref,
+    correctsEntryId: row.corrects_entry_id,
+    recordedByName: row.recorded_by_name,
+    witnessName: row.witness_name,
+    witnessRole: row.witness_role,
+    witnessVerified: row.witness_verified,
+    authorisedWitnessName: row.authorised_witness_name,
+    authorisedWitnessRole: row.authorised_witness_role,
+    authorisation: row.authorisation,
+  };
+}
+
+async function cdEntryRows(drugId: number) {
+  return await sql`
+    SELECT e.*, u.name AS recorded_by_name, i.ref AS incident_ref
+    FROM cd_entries e LEFT JOIN users u ON u.id = e.recorded_by LEFT JOIN incidents i ON i.id = e.incident_id
+    WHERE e.drug_id = ${drugId}
+    ORDER BY e.occurred_at ASC, e.id ASC
+  `;
+}
+
+// Witness: a second Dynamo user confirming with their password, or a named
+// witness who isn't a Dynamo user.
+async function resolveCdWitness(w: any, auth: any): Promise<{ error?: string; userId?: number | null; name?: string; role?: string | null; verified?: boolean }> {
+  if (!w || typeof w !== "object") return { error: "A witness is required for every controlled drug entry." };
+  if (w.mode === "USER") {
+    const userId = Number(w.userId);
+    if (!userId) return { error: "Choose the witness." };
+    if (userId === auth.sub) return { error: "The witness must be a different person from the one making the entry." };
+    const [u] = await sql`SELECT id, name, password_hash, active FROM users WHERE id = ${userId}`;
+    if (!u || !u.active) return { error: "That witness account isn't active." };
+    const key = `cd-witness:${userId}`;
+    if (recentAttempts(key, LOGIN_WINDOW_MS).length >= LOGIN_MAX_PER_EMAIL) return { error: "Too many wrong witness passwords. Try again in 15 minutes." };
+    const ok = await bcrypt.compare(String(w.password || ""), u.password_hash);
+    if (!ok) { recordAttempt(key); return { error: "The witness password isn't right." }; }
+    attemptBuckets.delete(key);
+    return { userId: u.id, name: u.name, role: cleanText(w.role, 80), verified: true };
+  }
+  if (w.mode === "OTHER") {
+    const name = cleanText(w.name, 120);
+    const role = cleanText(w.role, 80);
+    if (!name || !role) return { error: "Enter the witness's name and role." };
+    if (samePerson(name, auth.name)) return { error: "The witness must be a different person from the one making the entry." };
+    return { userId: null, name, role, verified: false };
+  }
+  return { error: "Choose how the entry is witnessed." };
+}
+
+async function handleControlledDrugsRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+  if (!path.startsWith("/api/cd")) return null;
+  const auth = await getAuth(req);
+  if (!auth) return json({ error: "Unauthorized" }, 401);
+  if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+
+  if (path === "/api/cd/drugs" && method === "GET") {
+    return json(((await cdDrugRows(null, url.searchParams.get("archived") === "1")) as any[]).map(serializeCdDrug));
+  }
+
+  if (path === "/api/cd/drugs" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const name = cleanText(body.name, 120);
+    const form = cleanText(body.form, 60);
+    const strength = cleanText(body.strength, 60);
+    const location = cleanText(body.location, 80);
+    if (!name || !form || !strength) return json({ error: "Enter the drug name, form and strength — each gets its own register section." }, 400);
+    if (!location) return json({ error: "Enter the location (premises) this register section is kept at." }, 400);
+    const schedule = CD_SCHEDULES.includes(String(body.schedule)) ? String(body.schedule) : null;
+    if (!schedule) return json({ error: "Choose the schedule." }, 400);
+    const minQty = cleanQty(body.minQty ?? 0);
+    const opening = cleanQty(body.openingBalance ?? 0);
+    if (minQty === null || opening === null) return json({ error: "Quantities must be 0 or more." }, 400);
+    const [dup] = await sql`
+      SELECT id FROM cd_drugs WHERE active AND lower(name) = lower(${name}) AND lower(form) = lower(${form})
+        AND lower(strength) = lower(${strength}) AND lower(location) = lower(${location})
+    `;
+    if (dup) return json({ error: "A register section for this drug, form and strength already exists at that location." }, 400);
+    const witness = await resolveCdWitness(body.witness, auth);
+    if (witness.error) return json({ error: witness.error }, 400);
+    const id = await sql.begin(async (tx: any) => {
+      const [d] = await tx`
+        INSERT INTO cd_drugs (name, form, strength, schedule, unit, location, min_qty, balance)
+        VALUES (${name}, ${form}, ${strength}, ${schedule}, ${cleanText(body.unit, 30) || "units"}, ${location}, ${minQty}, ${opening})
+        RETURNING id
+      `;
+      await tx`
+        INSERT INTO cd_entries (drug_id, type, quantity, balance_after, occurred_at, reason, recorded_by,
+          witness_user_id, witness_name, witness_role, witness_verified)
+        VALUES (${d.id}, 'OPENING', ${opening}, ${opening}, now(), ${cleanText(body.openingNote, 300) || "Register section opened"}, ${auth.sub},
+          ${witness.userId}, ${witness.name}, ${witness.role}, ${witness.verified})
+      `;
+      return d.id;
+    });
+    const [row] = await cdDrugRows(id, true);
+    return json(serializeCdDrug(row), 201);
+  }
+
+  if (path === "/api/cd/summary" && method === "GET") {
+    const drugs = ((await cdDrugRows(null, false)) as any[]).map(serializeCdDrug);
+    return json({
+      sections: drugs.length,
+      checkOverdue: drugs.filter((d) => d.checkOverdue).length,
+      openDiscrepancies: drugs.reduce((n, d) => n + d.openDiscrepancies, 0),
+      belowMin: drugs.filter((d) => d.belowMin).length,
+      stockCheckDays: CD_STOCK_CHECK_DAYS,
+    });
+  }
+
+  const m = path.match(/^\/api\/cd\/drugs\/(\d+)(\/entries)?$/);
+  if (!m) return json({ error: "Not found" }, 404);
+  const id = Number(m[1]);
+  const [drugRow] = await cdDrugRows(id, true);
+  if (!drugRow) return json({ error: "Register section not found" }, 404);
+
+  if (!m[2] && method === "PUT") {
+    // Details only; the balance changes only through entries.
+    const body = await req.json().catch(() => ({}));
+    const minQty = body.minQty === undefined ? drugRow.min_qty : cleanQty(body.minQty);
+    if (minQty === null) return json({ error: "Minimum must be 0 or more." }, 400);
+    const active = body.active === false ? false : true;
+    if (!active && Number(drugRow.balance) > 0) return json({ error: "The balance must be 0 before a register section is closed." }, 400);
+    await sql`UPDATE cd_drugs SET min_qty = ${minQty}, unit = ${cleanText(body.unit, 30) || drugRow.unit}, active = ${active}, updated_at = now() WHERE id = ${id}`;
+    const [row] = await cdDrugRows(id, true);
+    return json(serializeCdDrug(row));
+  }
+
+  if (m[2] && method === "GET") {
+    return json({ drug: serializeCdDrug(drugRow), entries: ((await cdEntryRows(id)) as any[]).map(serializeCdEntry) });
+  }
+
+  if (m[2] && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const type = String(body.type || "").toUpperCase();
+    const def = CD_ENTRY_TYPES[type];
+    if (!def || type === "OPENING") return json({ error: "Choose the type of entry." }, 400);
+    if (!drugRow.active) return json({ error: "This register section is closed." }, 400);
+
+    // When it happened: not in the future; more than a day back needs a reason.
+    const occurred = body.occurredAt ? new Date(body.occurredAt) : new Date();
+    if (isNaN(occurred.getTime())) return json({ error: "Enter a valid date and time." }, 400);
+    if (occurred.getTime() > Date.now() + 5 * 60000) return json({ error: "The date and time can't be in the future." }, 400);
+    const lateReason = cleanText(body.lateReason, 300);
+    if (Date.now() - occurred.getTime() > 36 * 3600000 && !lateReason) {
+      return json({ error: "Entries should be made on the day or the next day. Give a reason for this late entry.", lateReasonRequired: true }, 400);
+    }
+
+    const qty = type === "STOCK_CHECK" ? 0 : type === "CORRECTION" ? Math.round(Number(body.quantity)) : cleanQty(body.quantity);
+    if (type !== "STOCK_CHECK" && type !== "CORRECTION" && !qty) return json({ error: "Enter the quantity." }, 400);
+    if (type === "CORRECTION" && (!Number.isFinite(qty as number) || qty === 0)) return json({ error: "Enter the correction as a positive or negative quantity." }, 400);
+
+    const f: any = {
+      supplier: cleanText(body.supplier, 160), supplierAddress: cleanText(body.supplierAddress, 300),
+      reference: cleanText(body.reference, 120), batch: cleanText(body.batch, 60), expiry: cleanDate(body.expiryDate),
+      patientRef: cleanText(body.patientRef, 120), administeredBy: cleanText(body.administeredBy, 120),
+      issuedTo: cleanText(body.issuedTo, 160), reason: cleanText(body.reason, 500), notes: cleanText(body.notes, 1000),
+      awName: cleanText(body.authorisedWitnessName, 120), awRole: cleanText(body.authorisedWitnessRole, 120),
+      authorisation: cleanText(body.authorisation, 160),
+    };
+    if (type === "RECEIVED" && (!f.supplier || !f.reference)) return json({ error: "Enter who supplied it and the requisition / invoice reference." }, 400);
+    if (type === "ADMINISTERED" && (!f.patientRef || !f.administeredBy)) return json({ error: "Enter the incident or patient record reference, and who administered it." }, 400);
+    if (type === "ISSUED" && !f.issuedTo) return json({ error: "Enter who or where it was issued to." }, 400);
+    if (type === "RETURNED" && !f.reason) return json({ error: "Enter who returned it and why." }, 400);
+    if (type === "DESTROYED" && (!f.reason || !f.awName || !f.awRole || !f.authorisation)) {
+      return json({ error: "Destruction must be witnessed by an authorised witness: enter the reason, and the authorised witness's name, role and authorisation." }, 400);
+    }
+    if (type === "CORRECTION" && !f.reason) return json({ error: "Give the reason for the correction." }, 400);
+    let correctsId: number | null = null;
+    if (type === "CORRECTION") {
+      correctsId = Number(body.correctsEntryId) || null;
+      if (!correctsId) return json({ error: "Choose the entry being corrected." }, 400);
+      const [orig] = await sql`SELECT id FROM cd_entries WHERE id = ${correctsId} AND drug_id = ${id}`;
+      if (!orig) return json({ error: "That entry isn't in this register section." }, 400);
+    }
+    let counted: number | null = null;
+    if (type === "STOCK_CHECK") {
+      counted = cleanQty(body.countedQty);
+      if (counted === null) return json({ error: "Enter the quantity counted." }, 400);
+    }
+
+    const witness = await resolveCdWitness(body.witness, auth);
+    if (witness.error) return json({ error: witness.error }, 400);
+
+    let result: any;
+    try {
+      result = await sql.begin(async (tx: any) => {
+        const [d] = await tx`SELECT balance FROM cd_drugs WHERE id = ${id} FOR UPDATE`;
+        const before = Number(d.balance);
+        const change = type === "STOCK_CHECK" ? 0 : type === "CORRECTION" ? (qty as number) : def.sign * (qty as number);
+        const after = before + change;
+        if (after < 0) throw new Error(`That would take the balance below zero (balance is ${before}).`);
+        const discrepancy = type === "STOCK_CHECK" ? counted !== before : false;
+        if (discrepancy && !f.reason) throw new Error(`The count (${counted}) doesn't match the register balance (${before}). Explain what's been found — an incident will be raised.`);
+        const [e] = await tx`
+          INSERT INTO cd_entries (drug_id, type, quantity, balance_after, occurred_at, late_reason, supplier, supplier_address,
+            reference, batch, expiry_date, patient_ref, administered_by, issued_to, reason, notes, counted_qty, expected_qty,
+            discrepancy, corrects_entry_id, recorded_by, witness_user_id, witness_name, witness_role, witness_verified,
+            authorised_witness_name, authorised_witness_role, authorisation)
+          VALUES (${id}, ${type}, ${change}, ${after}, ${occurred.toISOString()}, ${lateReason}, ${f.supplier}, ${f.supplierAddress},
+            ${f.reference}, ${f.batch}, ${f.expiry}, ${f.patientRef}, ${f.administeredBy}, ${f.issuedTo}, ${f.reason}, ${f.notes},
+            ${counted}, ${type === "STOCK_CHECK" ? before : null}, ${discrepancy}, ${correctsId}, ${auth.sub},
+            ${witness.userId}, ${witness.name}, ${witness.role}, ${witness.verified}, ${f.awName}, ${f.awRole}, ${f.authorisation})
+          RETURNING id
+        `;
+        if (change !== 0) await tx`UPDATE cd_drugs SET balance = ${after}, updated_at = now() WHERE id = ${id}`;
+        return { entryId: e.id, discrepancy, before };
+      });
+    } catch (err: any) {
+      return json({ error: err.message || "Failed to save the entry" }, 400);
+    }
+
+    // Stock discrepancy: raise a high-severity medication incident.
+    if (result.discrepancy) {
+      const label = `${drugRow.name} ${drugRow.strength} ${drugRow.form}`;
+      const ref = await nextIncidentRef();
+      const description =
+        `Controlled drug stock discrepancy found at a stock check (${drugRow.location}).\n` +
+        `Drug: ${label} (Schedule ${drugRow.schedule}).\n` +
+        `Register balance: ${result.before} ${drugRow.unit}. Counted: ${counted} ${drugRow.unit}.\n` +
+        `Checked by ${auth.name}, witnessed by ${witness.name}.\nFindings: ${f.reason}`;
+      const [inc] = await sql`
+        INSERT INTO incidents (ref, reported_by, occurred_at, location, severity, category, description, status, responsible_manager_id)
+        VALUES (${ref}, ${auth.sub}, ${occurred.toISOString()}, ${drugRow.location}, 'HIGH', 'MEDICATION', ${description}, 'OPEN', NULL)
+        RETURNING id
+      `;
+      await sql`UPDATE cd_entries SET incident_id = ${inc.id} WHERE id = ${result.entryId}`;
+      await logIncidentAudit(inc.id, auth, "CREATED", `Incident ${ref} raised automatically from a controlled drug stock check discrepancy (${label})`);
+      notifyHighSeverityIncident(ref, "MEDICATION", drugRow.location, "").catch((err) => console.log(`CD discrepancy notify failed: ${err}`));
+    }
+    return json({ drug: serializeCdDrug((await cdDrugRows(id, true))[0]), entries: ((await cdEntryRows(id)) as any[]).map(serializeCdEntry), discrepancy: result.discrepancy }, 201);
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
 async function handleMeetingsRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
   if (!path.startsWith("/api/meetings")) return null;
   const auth = await getAuth(req);
@@ -6127,6 +6513,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     }
     const gdprResponse = await handleGdprRequest(req, url, path, method);
     if (gdprResponse) return gdprResponse;
+    const cdResponse = await handleControlledDrugsRequest(req, url, path, method);
+    if (cdResponse) return cdResponse;
     const meetingsResponse = await handleMeetingsRequest(req, url, path, method);
     if (meetingsResponse) return meetingsResponse;
     const publicBagResponse = await handlePublicDrugBagRequest(req, path, method, ip);

@@ -108,6 +108,7 @@ hr { display:none; }
 <li><strong>Medication Dashboard</strong> (under Medication) — drug bags and stock at a glance, with action lists and charts.</li>
 <li><strong>Drug Bag Sign In / Sign Out</strong> (under Medication) — sign drug bags out to crews, sign them back in, restock and reseal.</li>
 <li><strong>Medication Store</strong> (under Medication) — stock in hand, expiry dates by batch and minimum quantities.</li>
+<li><strong>Controlled Medication</strong> (under Medication) — the controlled drugs register, with a running balance, witnessed entries and stock checks.</li>
 <li><strong>Datix Dashboard</strong> (under Datix) — Datix documents at a glance, and the list of NHS trusts.</li>
 <li><strong>Datix Documents</strong> (under Datix) — drag and drop documents you receive from NHS trusts' Datix systems.</li>
 <li><strong>Fleet Management</strong> — vehicles, key dates, daily checks and defects.</li>
@@ -460,6 +461,28 @@ hr { display:none; }
 <li>The <strong>Stock movements</strong> tab lists every receipt, issue, disposal and count, with the balance after each one and who did it.</li>
 </ul>
 <p>The weekly summary email includes medicines below minimum and expired batches. The medication store is for stock control only; it is not a controlled drugs register.</p>
+<h3 id="sec-controlled-medication">Controlled medication (CD register)</h3>
+<p>The <strong>Controlled Medication</strong> page (under Medication) is Dynamo's controlled drugs register. Each drug, form and strength at each location has its own <strong>register section</strong>, for example "Morphine sulfate 10mg/1ml ampoule — Main station". Entries are listed in date and time order with a running balance.</p>
+<ul>
+<li><strong>Opening a section:</strong> click <strong>+ New register section</strong>. Enter the drug, strength, form, schedule, location and unit. If you're moving over from a paper register, enter the balance brought forward and the page it came from.</li>
+<li><strong>Making an entry:</strong> open the section and click <strong>+ New entry</strong>. Choose the type:
+  <ul>
+  <li><em>Received</em>: who supplied it and the requisition or invoice reference.</li>
+  <li><em>Administered to patient</em>: the patient record or CAD reference and who gave it. Record any wastage in the notes.</li>
+  <li><em>Issued</em>: who or where it went to, such as a drug bag.</li>
+  <li><em>Returned to stock</em>: who returned it and why.</li>
+  <li><em>Destroyed</em>: see below.</li>
+  </ul></li>
+<li><strong>Witness:</strong> every entry needs a second person. A Dynamo user confirms by entering their own password, which shows as "✓ Password confirmed". Anyone else is recorded by name and role, which shows as "Named witness". You can't witness your own entry.</li>
+<li><strong>Timing:</strong> make entries on the day, or the next day at the latest. For anything older, Dynamo asks for a reason and shows it on the register. Future dates are refused, and so is any entry that would take the balance below zero.</li>
+<li><strong>No edits or deletions:</strong> once signed, an entry can't be changed or deleted, not even by an admin; the database itself blocks it. If you make a mistake, add a <em>Correction</em> entry. Choose the entry it corrects, enter the adjustment (+ or −) and give the reason.</li>
+<li><strong>Stock checks:</strong> click <strong>Stock check</strong> and enter what you counted, with a witness. If the count matches, it's marked <em>Correct</em>. If it doesn't, you must say what was found. Dynamo then raises a high-severity medication incident and alerts managers, and the section shows <em>Discrepancy</em>. The balance isn't changed automatically: investigate, add a correction if needed, then do another stock check. A matching check clears the flag. A section with no stock check in the last 7 days shows <em>Check due</em>.</li>
+<li><strong>Destruction:</strong> expired or unwanted Schedule 2 stock can only be destroyed in front of an authorised witness appointed by your Controlled Drugs Accountable Officer (CDAO). Enter their name, role and authorisation reference.</li>
+<li><strong>Printing:</strong> click <strong>Print / PDF</strong> for a clean copy of the section's register, which you can save as a PDF from the print window.</li>
+<li><strong>Closing a section:</strong> when the balance is 0, use <strong>Close this section</strong> at the bottom. The section and all its entries stay on record. Keep registers for at least 2 years from the last entry.</li>
+</ul>
+<blockquote><p>The register supports your controlled drugs policy; it doesn't replace it. Follow your organisation's CD standard operating procedures and your CDAO's instructions. Report any concerns about controlled drugs to the CDAO.</p></blockquote>
+
 <h3 id="sec-datix-documents">Datix</h3>
 <p>The <strong>Datix</strong> section of the sidebar is where managers and admins keep documents received from NHS trusts' Datix systems, such as incident reports, feedback and requests for information about our crews.</p>
 <p>It has two pages: the <strong>Datix Dashboard</strong> (an overview and the list of NHS trusts) and <strong>Datix Documents</strong> (where you upload and find the documents).</p>

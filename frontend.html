@@ -475,6 +475,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--b
 .dash-bar-value { font-size: 13px; font-weight: 700; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
 .dash-trend-svg { width: 100%; height: 160px; display: block; }
 
+@media print {
+  .sidebar, .topbar, .no-print, .modal-backdrop { display: none !important; }
+  .main { margin: 0 !important; padding: 0 !important; }
+  .content { padding: 0 !important; }
+  .cd-table { font-size: 11px; }
+  .card { box-shadow: none !important; border: 1px solid #ccc; }
+}
     </style>
     <script type="importmap">
       {
@@ -630,6 +637,12 @@ const api = {
   publicBagSignOut: (data) => request('/public/drug-bags/sign-out', { method: 'POST', body: data }),
   publicBagSignIn: (data) => request('/public/drug-bags/sign-in', { method: 'POST', body: data }),
   getMedStoreSummary: () => request('/med-store/summary'),
+  listCdDrugs: (archived) => request('/cd/drugs', { params: archived ? { archived: '1' } : {} }),
+  getCdSummary: () => request('/cd/summary'),
+  createCdDrug: (body) => request('/cd/drugs', { method: 'POST', body }),
+  updateCdDrug: (id, body) => request(`/cd/drugs/${id}`, { method: 'PUT', body }),
+  getCdRegister: (id) => request(`/cd/drugs/${id}/entries`),
+  addCdEntry: (id, body) => request(`/cd/drugs/${id}/entries`, { method: 'POST', body }),
   getMedDashboard: () => request('/med-store/dashboard'),
   listMedItems: (archived) => request('/med-store/items', { params: { archived: archived ? 1 : undefined } }),
   createMedItem: (data) => request('/med-store/items', { method: 'POST', body: data }),
@@ -816,6 +829,7 @@ function buildNav(isAdmin) {
       { to: '/medication-dashboard', label: 'Medication Dashboard', icon: '📈' },
       { to: '/medication', label: 'Drug Bag Sign In / Sign Out', icon: '💊' },
       { to: '/medication-store', label: 'Medication Store', icon: '📦' },
+      { to: '/controlled-drugs', label: 'Controlled Medication', icon: '🔐' },
     ] });
   }
   if (isAdmin) {
@@ -848,6 +862,7 @@ function Layout({ children }) {
     : location.pathname.startsWith('/fleet') ? 'Fleet Management'
     : location.pathname.startsWith('/datix') ? 'Datix'
     : location.pathname.startsWith('/medication-store') ? 'Medication Store'
+    : location.pathname.startsWith('/controlled-drugs') ? 'Controlled Medication'
     : location.pathname.startsWith('/medication-dashboard') ? 'Medication Dashboard'
     : location.pathname.startsWith('/medication') ? 'Medication'
     : location.pathname.startsWith('/staff') ? 'Staff'
@@ -6902,6 +6917,440 @@ function stockBadge(i) {
   return <span className="badge badge-green">OK</span>;
 }
 
+// ===================== Controlled drugs register =====================
+const CD_TYPES = [
+  { key: 'RECEIVED', label: 'Received into stock', dir: 'in' },
+  { key: 'ADMINISTERED', label: 'Administered to patient', dir: 'out' },
+  { key: 'ISSUED', label: 'Issued (to a drug bag / clinician / site)', dir: 'out' },
+  { key: 'RETURNED', label: 'Returned to stock', dir: 'in' },
+  { key: 'DESTROYED', label: 'Destroyed (authorised witness)', dir: 'out' },
+  { key: 'STOCK_CHECK', label: 'Stock check', dir: '' },
+  { key: 'CORRECTION', label: 'Correction to an earlier entry', dir: '' },
+];
+const CD_FORMS = ['Ampoule', 'Vial', 'Tablet', 'Oral solution', 'Prefilled syringe', 'Patch', 'Lozenge', 'Other'];
+
+function cdLabel(d) { return `${d.name} ${d.strength} ${d.form}`; }
+function cdDateTime(d) { return d ? `${new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })} ${fmtTime(d)}` : '—'; }
+function nowLocalInput() {
+  const d = new Date(); d.setSeconds(0, 0);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+function cdEntryDetails(e) {
+  const bits = [];
+  if (e.type === 'RECEIVED') bits.push(`From ${e.supplier}${e.supplierAddress ? `, ${e.supplierAddress}` : ''}`, `Ref ${e.reference}`);
+  if (e.type === 'ADMINISTERED') bits.push(`Patient / incident ref ${e.patientRef}`, `Given by ${e.administeredBy}`);
+  if (e.type === 'ISSUED') bits.push(`To ${e.issuedTo}`);
+  if (e.type === 'DESTROYED') bits.push(`Authorised witness ${e.authorisedWitnessName} (${e.authorisedWitnessRole}, ${e.authorisation})`);
+  if (e.type === 'STOCK_CHECK') bits.push(`Counted ${e.countedQty}, register ${e.expectedQty}`);
+  if (e.type === 'CORRECTION') bits.push(`Corrects entry #${e.correctsEntryId}`);
+  if (e.batch) bits.push(`Batch ${e.batch}`);
+  if (e.expiryDate) bits.push(`Exp ${fmtShort(e.expiryDate)}`);
+  if (e.reference && e.type !== 'RECEIVED') bits.push(`Ref ${e.reference}`);
+  if (e.reason) bits.push(e.reason);
+  if (e.notes) bits.push(e.notes);
+  return bits.join(' · ');
+}
+
+function CdWitnessFields({ witness, setWitness, staff, meId }) {
+  const set = (patch) => setWitness({ ...witness, ...patch });
+  return (
+    <div className="card" style={{ padding: 12, marginTop: 12, background: 'var(--bg, #f8fafc)' }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Witness <span style={{ color: 'var(--red)' }}>*</span></div>
+      <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>A second person must witness every entry. A Dynamo user confirms with their own password.</div>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 8, fontSize: 13 }}>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input type="radio" checked={witness.mode === 'USER'} onChange={() => set({ mode: 'USER' })} /> Dynamo user
+        </label>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input type="radio" checked={witness.mode === 'OTHER'} onChange={() => set({ mode: 'OTHER' })} /> Someone else
+        </label>
+      </div>
+      <div className="form-grid">
+        {witness.mode === 'USER' ? (
+          <>
+            <div className="form-field">
+              <label>Witness</label>
+              <select value={witness.userId || ''} onChange={(e) => set({ userId: e.target.value })} required>
+                <option value="">Choose…</option>
+                {staff.filter((s) => s.active !== false && Number(s.id) !== Number(meId)).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+            <div className="form-field">
+              <label>Witness's password</label>
+              <input type="password" autoComplete="off" value={witness.password || ''} onChange={(e) => set({ password: e.target.value })} required />
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="form-field">
+              <label>Witness name</label>
+              <input value={witness.name || ''} onChange={(e) => set({ name: e.target.value })} required />
+            </div>
+            <div className="form-field">
+              <label>Role / registration</label>
+              <input value={witness.role || ''} onChange={(e) => set({ role: e.target.value })} placeholder="e.g. Paramedic, HCPC PA12345" required />
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function useCdStaff() {
+  const [staff, setStaff] = useState([]);
+  useEffect(() => { api.listStaff().then(setStaff).catch(() => {}); }, []);
+  return staff;
+}
+
+function ControlledDrugs() {
+  const navigate = useNavigate();
+  const [drugs, setDrugs] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [showClosed, setShowClosed] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [adding, setAdding] = useState(false);
+
+  function load() {
+    return Promise.all([api.listCdDrugs(showClosed).then(setDrugs), api.getCdSummary().then(setSummary)])
+      .catch((err) => setError(err.message || 'Failed to load the register'))
+      .finally(() => setLoading(false));
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [showClosed]);
+  if (loading) return <div className="page-loading">Loading…</div>;
+
+  const byLocation = {};
+  drugs.forEach((d) => { (byLocation[d.location] = byLocation[d.location] || []).push(d); });
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Controlled Medication</h1>
+          <div className="page-sub">Controlled drugs register — one section per drug, form and strength at each location, with a running balance</div>
+        </div>
+        <div className="page-header-actions">
+          <button className="btn btn-primary" onClick={() => setAdding(true)}>+ New register section</button>
+        </div>
+      </div>
+      {error && <div className="error-banner" style={{ marginBottom: 12 }}>{error}</div>}
+
+      {summary && (
+        <div className="kpi-grid">
+          <div className="kpi-card">
+            <div className="kpi-value">{summary.sections}</div>
+            <div className="kpi-label">Register sections</div>
+            <div className="kpi-sub">Drug / form / strength / location</div>
+          </div>
+          <div className={'kpi-card ' + (summary.openDiscrepancies ? 'kpi-card-red' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.openDiscrepancies}</div>
+            <div className="kpi-label">Unresolved discrepancies</div>
+            <div className="kpi-sub">Cleared by a matching stock check</div>
+          </div>
+          <div className={'kpi-card ' + (summary.checkOverdue ? 'kpi-card-amber' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.checkOverdue}</div>
+            <div className="kpi-label">Stock check overdue</div>
+            <div className="kpi-sub">None in the last {summary.stockCheckDays} days</div>
+          </div>
+          <div className={'kpi-card ' + (summary.belowMin ? 'kpi-card-amber' : 'kpi-card-green')}>
+            <div className="kpi-value">{summary.belowMin}</div>
+            <div className="kpi-label">Below minimum</div>
+            <div className="kpi-sub">Reorder needed</div>
+          </div>
+        </div>
+      )}
+
+      <div className="card table-card">
+        <div style={{ padding: '10px 16px', display: 'flex', alignItems: 'center' }}>
+          <span className="muted" style={{ fontSize: 13 }}>Entries can't be edited or deleted. Mistakes are put right with a correction entry.</span>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, marginLeft: 'auto' }}>
+            <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} /> Show closed sections
+          </label>
+        </div>
+        {drugs.length === 0 ? (
+          <div className="empty">No register sections yet. Use “+ New register section” for each controlled drug you hold.</div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="table">
+              <thead><tr><th>Drug</th><th>Schedule</th><th>Balance</th><th>Last stock check</th><th>Status</th></tr></thead>
+              <tbody>
+                {Object.keys(byLocation).map((loc) => (
+                  <React.Fragment key={loc}>
+                    <tr><td colSpan={5} style={{ background: 'var(--bg, #f8fafc)', fontWeight: 600, fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.4 }}>📍 {loc}</td></tr>
+                    {byLocation[loc].map((d) => (
+                      <tr key={d.id} className="row-clickable" onClick={() => navigate(`/controlled-drugs/${d.id}`)} style={d.active ? undefined : { opacity: 0.55 }}>
+                        <td><div className="ref-link">{d.name} {d.strength}</div><div className="muted" style={{ fontSize: 12 }}>{d.form}{!d.active ? ' · closed' : ''}</div></td>
+                        <td>CD{d.schedule}</td>
+                        <td><strong>{d.balance}</strong> {d.unit}<div className="muted" style={{ fontSize: 12 }}>Min {d.minQty}</div></td>
+                        <td>{d.lastCheckAt ? cdDateTime(d.lastCheckAt) : <span className="muted">Never</span>}</td>
+                        <td><div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                          {d.openDiscrepancies > 0 && <span className="badge badge-red">Discrepancy</span>}
+                          {d.active && d.checkOverdue && <span className="badge badge-amber">Check due</span>}
+                          {d.belowMin && <span className="badge badge-amber">Below min</span>}
+                          {!d.openDiscrepancies && !d.checkOverdue && !d.belowMin && <span className="badge badge-green">OK</span>}
+                        </div></td>
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+        Keep registers for at least 2 years from the last entry. This register supports, and doesn't replace, your controlled drugs policy and your Controlled Drugs Accountable Officer's procedures.
+      </div>
+
+      {adding && <CdDrugModal onClose={() => setAdding(false)} onSaved={(d) => { setAdding(false); navigate(`/controlled-drugs/${d.id}`); }} />}
+    </div>
+  );
+}
+
+function CdDrugModal({ onClose, onSaved }) {
+  const { user } = useAuth();
+  const staff = useCdStaff();
+  const [f, setF] = useState({ name: '', form: 'Ampoule', strength: '', schedule: '2', unit: 'ampoules', location: '', minQty: '0', openingBalance: '0', openingNote: '' });
+  const [witness, setWitness] = useState({ mode: 'USER' });
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+
+  async function submit(e) {
+    e.preventDefault(); setError(''); setBusy(true);
+    try { onSaved(await api.createCdDrug({ ...f, witness })); }
+    catch (err) { setError(err.message || 'Failed to create the register section'); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 620 }}>
+        <div className="modal-header"><h2>New register section</h2><button type="button" className="modal-close" onClick={onClose}>✕</button></div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field"><label>Drug name *</label><input value={f.name} onChange={set('name')} placeholder="e.g. Morphine sulfate" required autoFocus /></div>
+          <div className="form-field"><label>Strength *</label><input value={f.strength} onChange={set('strength')} placeholder="e.g. 10mg/1ml" required /></div>
+          <div className="form-field"><label>Form *</label><select value={f.form} onChange={set('form')}>{CD_FORMS.map((x) => <option key={x}>{x}</option>)}</select></div>
+          <div className="form-field"><label>Schedule *</label><select value={f.schedule} onChange={set('schedule')}>{['2', '3', '4', '5'].map((x) => <option key={x} value={x}>Schedule {x}</option>)}</select></div>
+          <div className="form-field"><label>Location (premises) *</label><input value={f.location} onChange={set('location')} placeholder="e.g. Main station CD cabinet" required /></div>
+          <div className="form-field"><label>Unit</label><input value={f.unit} onChange={set('unit')} /></div>
+          <div className="form-field"><label>Minimum stock</label><input type="number" min="0" value={f.minQty} onChange={set('minQty')} /></div>
+          <div className="form-field"><label>Opening balance</label><input type="number" min="0" value={f.openingBalance} onChange={set('openingBalance')} /></div>
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}><label>Opening note</label><input value={f.openingNote} onChange={set('openingNote')} placeholder="e.g. Balance brought forward from paper register page 14" /></div>
+        </div>
+        <CdWitnessFields witness={witness} setWitness={setWitness} staff={staff} meId={user?.id} />
+        <div className="modal-footer"><div /><div className="modal-footer-right">
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Open section'}</button>
+        </div></div>
+      </form>
+    </div>
+  );
+}
+
+function CdEntryModal({ drug, entries, initialType, onClose, onSaved }) {
+  const { user } = useAuth();
+  const staff = useCdStaff();
+  const [type, setType] = useState(initialType || 'ADMINISTERED');
+  const [f, setF] = useState({ occurredAt: nowLocalInput(), quantity: '', administeredBy: user?.name || '' });
+  const [witness, setWitness] = useState({ mode: 'USER' });
+  const [error, setError] = useState('');
+  const [needLate, setNeedLate] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const t = CD_TYPES.find((x) => x.key === type);
+  const q = Number(f.quantity) || 0;
+  const after = type === 'STOCK_CHECK' ? drug.balance : type === 'CORRECTION' ? drug.balance + q : drug.balance + (t.dir === 'in' ? q : -q);
+  const late = f.occurredAt && Date.now() - new Date(f.occurredAt).getTime() > 36 * 3600000;
+  const mismatch = type === 'STOCK_CHECK' && f.countedQty !== undefined && f.countedQty !== '' && Number(f.countedQty) !== drug.balance;
+  const req = <span style={{ color: 'var(--red)' }}>*</span>;
+  const field = (label, k, props = {}, required = false) => (
+    <div className="form-field" style={props.wide ? { gridColumn: '1 / -1' } : undefined}>
+      <label>{label} {required && req}</label>
+      <input value={f[k] || ''} onChange={set(k)} required={required} {...{ ...props, wide: undefined }} />
+    </div>
+  );
+
+  async function submit(e) {
+    e.preventDefault(); setError(''); setBusy(true);
+    try {
+      const res = await api.addCdEntry(drug.id, { ...f, type, occurredAt: new Date(f.occurredAt).toISOString(), witness });
+      onSaved(res, type);
+    } catch (err) {
+      if (err.data?.lateReasonRequired) setNeedLate(true);
+      setError(err.message || 'Failed to save the entry');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <form className="modal" onMouseDown={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 640 }}>
+        <div className="modal-header"><h2>Register entry — {cdLabel(drug)}</h2><button type="button" className="modal-close" onClick={onClose}>✕</button></div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Type of entry {req}</label>
+            <select value={type} onChange={(e) => setType(e.target.value)}>{CD_TYPES.map((x) => <option key={x.key} value={x.key}>{x.label}</option>)}</select>
+          </div>
+          <div className="form-field">
+            <label>Date and time it happened {req}</label>
+            <input type="datetime-local" value={f.occurredAt} max={nowLocalInput()} onChange={set('occurredAt')} required />
+          </div>
+          {type !== 'STOCK_CHECK' && (
+            <div className="form-field">
+              <label>{type === 'CORRECTION' ? `Adjustment (+ or −, ${drug.unit})` : `Quantity (${drug.unit})`} {req}</label>
+              <input type="number" min={type === 'CORRECTION' ? undefined : 1} value={f.quantity} onChange={set('quantity')} required />
+            </div>
+          )}
+          {type === 'STOCK_CHECK' && (
+            <div className="form-field">
+              <label>Quantity counted ({drug.unit}) {req}</label>
+              <input type="number" min="0" value={f.countedQty ?? ''} onChange={set('countedQty')} required />
+            </div>
+          )}
+          <div className="form-field">
+            <label>Balance after</label>
+            <div style={{ padding: '8px 0', fontWeight: 600, color: after < 0 ? 'var(--red)' : undefined }}>
+              {type === 'STOCK_CHECK' ? `${drug.balance} (unchanged)` : `${drug.balance} → ${after}`} {drug.unit}
+            </div>
+          </div>
+
+          {type === 'RECEIVED' && (<>
+            {field('Supplied by', 'supplier', { placeholder: 'Pharmacy / wholesaler' }, true)}
+            {field('Requisition / invoice ref', 'reference', {}, true)}
+            {field('Supplier address', 'supplierAddress', { wide: true })}
+            {field('Batch', 'batch')}
+            <div className="form-field"><label>Expiry date</label><input type="date" value={f.expiryDate || ''} onChange={set('expiryDate')} /></div>
+          </>)}
+          {type === 'ADMINISTERED' && (<>
+            {field('Incident / patient record ref', 'patientRef', { placeholder: 'e.g. ePCR or CAD number' }, true)}
+            {field('Administered by', 'administeredBy', {}, true)}
+            {field('Notes (dose given / wasted)', 'notes', { wide: true, placeholder: 'e.g. 5mg given, 5mg wasted and witnessed' })}
+          </>)}
+          {type === 'ISSUED' && (<>
+            {field('Issued to', 'issuedTo', { placeholder: 'e.g. Drug bag DB-003 / clinician name' }, true)}
+            {field('Reference', 'reference')}
+          </>)}
+          {type === 'RETURNED' && field('Returned by and why', 'reason', { wide: true }, true)}
+          {type === 'DESTROYED' && (<>
+            {field('Reason (e.g. expired, damaged)', 'reason', { wide: true }, true)}
+            {field('Authorised witness name', 'authorisedWitnessName', {}, true)}
+            {field('Authorised witness role', 'authorisedWitnessRole', { placeholder: 'e.g. CDAO-appointed witness' }, true)}
+            {field('Authorisation reference', 'authorisation', { wide: true, placeholder: 'e.g. CDAO authorisation / CD reporting portal ref' }, true)}
+          </>)}
+          {type === 'STOCK_CHECK' && (mismatch || f.reason) && field('What was found (required if count differs)', 'reason', { wide: true }, mismatch)}
+          {type === 'CORRECTION' && (<>
+            <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+              <label>Entry being corrected {req}</label>
+              <select value={f.correctsEntryId || ''} onChange={set('correctsEntryId')} required>
+                <option value="">Choose…</option>
+                {[...entries].reverse().filter((x) => x.type !== 'CORRECTION').map((x) => (
+                  <option key={x.id} value={x.id}>#{x.id} · {cdDateTime(x.occurredAt)} · {x.typeLabel} {x.quantity ? `(${x.quantity > 0 ? '+' : ''}${x.quantity})` : ''}</option>
+                ))}
+              </select>
+            </div>
+            {field('Reason for correction', 'reason', { wide: true }, true)}
+          </>)}
+          {(late || needLate) && field('Reason this entry is late', 'lateReason', { wide: true, placeholder: 'Entries should be made on the day or the next day' }, true)}
+        </div>
+        {mismatch && <div className="error-banner" style={{ marginTop: 10 }}>The count doesn't match the register balance ({drug.balance}). Saving raises a high-severity medication incident. The balance isn't changed — investigate, then record a correction if needed.</div>}
+        <CdWitnessFields witness={witness} setWitness={setWitness} staff={staff} meId={user?.id} />
+        <div className="modal-footer"><div className="muted" style={{ fontSize: 12 }}>Recorded by {user?.name}. Entries can't be changed afterwards.</div><div className="modal-footer-right">
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={busy || after < 0}>{busy ? 'Saving…' : 'Sign entry'}</button>
+        </div></div>
+      </form>
+    </div>
+  );
+}
+
+function CdRegister() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [entryType, setEntryType] = useState(null);
+
+  function load() { return api.getCdRegister(id).then(setData).catch((err) => setError(err.message || 'Failed to load the register')); }
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
+  if (error && !data) return <div className="error-banner">{error}</div>;
+  if (!data) return <div className="page-loading">Loading…</div>;
+  const { drug, entries } = data;
+
+  async function closeSection() {
+    if (!window.confirm('Close this register section? It stays on record but no more entries can be made.')) return;
+    try { await api.updateCdDrug(drug.id, { active: false }); load(); } catch (err) { setError(err.message); }
+  }
+
+  return (
+    <div className="cd-register">
+      <div className="page-header">
+        <div>
+          <div className="no-print"><button className="btn btn-ghost btn-sm" onClick={() => navigate('/controlled-drugs')}>← Controlled Medication</button></div>
+          <h1>{drug.name} {drug.strength} — {drug.form}</h1>
+          <div className="page-sub">Schedule {drug.schedule} · {drug.location} · Balance <strong>{drug.balance}</strong> {drug.unit}{!drug.active ? ' · Section closed' : ''}</div>
+        </div>
+        <div className="page-header-actions no-print">
+          <button className="btn btn-ghost" onClick={() => window.print()}>🖨 Print / PDF</button>
+          {drug.active && <button className="btn btn-ghost" onClick={() => setEntryType('STOCK_CHECK')}>Stock check</button>}
+          {drug.active && <button className="btn btn-primary" onClick={() => setEntryType('ADMINISTERED')}>+ New entry</button>}
+        </div>
+      </div>
+      {error && <div className="error-banner no-print" style={{ marginBottom: 12 }}>{error}</div>}
+      {notice && <div className="success-banner no-print" style={{ marginBottom: 12 }}>{notice}</div>}
+      {drug.openDiscrepancies > 0 && <div className="error-banner" style={{ marginBottom: 12 }}>Unresolved stock discrepancy — see the linked incident. It clears when a stock check matches the balance.</div>}
+      {drug.active && drug.checkOverdue && <div className="warning-banner no-print" style={{ marginBottom: 12, padding: 10, borderRadius: 8, background: '#fef3c7', color: '#92400e' }}>No stock check recorded in the last 7 days.</div>}
+
+      <div className="card table-card">
+        <div style={{ overflowX: 'auto' }}>
+          <table className="table cd-table">
+            <thead><tr><th>#</th><th>Date / time</th><th>Entry</th><th>Details</th><th style={{ textAlign: 'right' }}>In</th><th style={{ textAlign: 'right' }}>Out</th><th style={{ textAlign: 'right' }}>Balance</th><th>Made by</th><th>Witness</th></tr></thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id} style={e.discrepancy ? { background: '#fef2f2' } : undefined}>
+                  <td className="muted">{e.id}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    {cdDateTime(e.occurredAt)}
+                    {e.lateReason && <div style={{ fontSize: 11, color: '#92400e' }}>Late entry ({cdDateTime(e.recordedAt)}): {e.lateReason}</div>}
+                  </td>
+                  <td>
+                    {e.typeLabel}
+                    {e.type === 'STOCK_CHECK' && (e.discrepancy ? <div><span className="badge badge-red">Discrepancy</span></div> : <div><span className="badge badge-green">Correct</span></div>)}
+                    {e.incidentRef && <div style={{ fontSize: 12 }}><a className="no-print" href={`/incidents/${e.incidentId}`} onClick={(ev) => { ev.preventDefault(); navigate(`/incidents/${e.incidentId}`); }}>{e.incidentRef}</a></div>}
+                  </td>
+                  <td style={{ fontSize: 13, maxWidth: 320 }}>{cdEntryDetails(e)}</td>
+                  <td style={{ textAlign: 'right' }}>{e.quantity > 0 ? e.quantity : ''}</td>
+                  <td style={{ textAlign: 'right' }}>{e.quantity < 0 ? -e.quantity : ''}</td>
+                  <td style={{ textAlign: 'right' }}><strong>{e.balanceAfter}</strong></td>
+                  <td style={{ fontSize: 13 }}>{e.recordedByName || '—'}</td>
+                  <td style={{ fontSize: 13 }}>
+                    {e.witnessName}{e.witnessRole ? <div className="muted" style={{ fontSize: 11 }}>{e.witnessRole}</div> : null}
+                    <div style={{ fontSize: 11 }} className="muted">{e.witnessVerified ? '✓ Password confirmed' : 'Named witness'}</div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+        Printed from Dynamo {cdDateTime(new Date())}. Entries are in date and time order; corrections are shown as new entries and never overwrite the original.
+        {drug.active && drug.balance === 0 && <> <button className="btn btn-ghost btn-sm no-print" onClick={closeSection}>Close this section</button></>}
+      </div>
+
+      {entryType && (
+        <CdEntryModal drug={drug} entries={entries} initialType={entryType} onClose={() => setEntryType(null)}
+          onSaved={(res, type) => {
+            setEntryType(null); setData(res);
+            setNotice(res.discrepancy ? 'Stock check recorded with a discrepancy. A high-severity incident has been raised.' : `${CD_TYPES.find((x) => x.key === type).label} entry signed. Balance now ${res.drug.balance} ${res.drug.unit}.`);
+          }} />
+      )}
+    </div>
+  );
+}
+
 function MedicationStore() {
   const [tab, setTab] = useState('stock');
   const [summary, setSummary] = useState(null);
@@ -8839,6 +9288,8 @@ function AppRoutes() {
                 <Route path="/fleet" element={<AdminRoute><FleetManagement /></AdminRoute>} />
                 <Route path="/medication" element={<AdminRoute><Medication /></AdminRoute>} />
                 <Route path="/medication-store" element={<AdminRoute><MedicationStore /></AdminRoute>} />
+                <Route path="/controlled-drugs" element={<AdminRoute><ControlledDrugs /></AdminRoute>} />
+                <Route path="/controlled-drugs/:id" element={<AdminRoute><CdRegister /></AdminRoute>} />
                 <Route path="/medication-dashboard" element={<AdminRoute><MedicationDashboard /></AdminRoute>} />
                 <Route path="/meetings/:type" element={<AdminRoute><MeetingsList /></AdminRoute>} />
                 <Route path="/meetings/:type/:id" element={<AdminRoute><MeetingEditor /></AdminRoute>} />
