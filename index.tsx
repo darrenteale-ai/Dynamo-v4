@@ -124,6 +124,7 @@ async function snapshotDatabase() {
     "safety_alerts", "safety_alert_acks", "app_settings", "case_notes", "case_note_entries", "gdpr_log",
     "vehicles", "vdi_checks", "vehicle_defects", "assets", "asset_issues",
     "drug_bags", "drug_bag_movements", "drug_bag_events", "med_items", "med_batches", "med_movements",
+    "meetings", "meeting_actions",
     "datix_documents", "datix_events", "datix_trusts",
   ];
   const out: Record<string, any[]> = {};
@@ -910,6 +911,43 @@ async function ensureSchema() {
       actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       actor_name TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+
+  // ---- Managers' meetings (daily / weekly) ----
+  await sql`
+    CREATE TABLE IF NOT EXISTS meetings (
+      id SERIAL PRIMARY KEY,
+      type TEXT NOT NULL,
+      meeting_date DATE NOT NULL,
+      chair TEXT,
+      attendees TEXT,
+      apologies TEXT,
+      notes JSONB NOT NULL DEFAULT '{}'::jsonb,
+      snapshot JSONB,
+      status TEXT NOT NULL DEFAULT 'DRAFT',
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      finalised_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      finalised_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (type, meeting_date)
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS meeting_actions (
+      id SERIAL PRIMARY KEY,
+      meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+      description TEXT NOT NULL,
+      owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      due_date DATE,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      completed_at TIMESTAMPTZ,
+      completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      completion_note TEXT
     )
   `;
 
@@ -3095,6 +3133,17 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
         ORDER BY d.uploaded_at ASC
       `
     : [];
+  const meetingMentions = subject.name
+    ? await sql`
+        SELECT id, type, meeting_date, chair, attendees, apologies, notes FROM meetings
+        WHERE chair ILIKE ${like} OR attendees ILIKE ${like} OR apologies ILIKE ${like} OR notes::text ILIKE ${like}
+        ORDER BY meeting_date
+      `
+    : [];
+  const meetingActions = await sql`
+    SELECT a.id, a.meeting_id, a.description, a.due_date, a.status, a.completed_at FROM meeting_actions a
+    WHERE a.owner_id = ${userId} OR a.created_by = ${userId} OR a.description ILIKE ${like}
+  `;
   const drugBagMovements = subject.name
     ? await sql`
         SELECT m.id, b.bag_number, m.signed_out_at, m.signed_out_to, m.second_crew, m.call_sign, m.seal_out,
@@ -3140,6 +3189,8 @@ async function buildSubjectExport(subject: { user: any; email: string | null; na
     vehicleDefectsReported,
     equipmentIssued,
     drugBagMovements,
+    meetingMentions,
+    meetingActions,
     // Datix documents are only shown to admins with Datix access; others get
     // the number of matches and who to ask.
     ...(auth?.datixAccess
@@ -5106,6 +5157,349 @@ async function medStoreSummary() {
   };
 }
 
+// =====================================================================
+// Managers' meetings: daily huddle and weekly meeting. Each meeting has a
+// fixed agenda with notes, a snapshot of live Dynamo figures, attendees,
+// and actions that carry forward until done. Finalising locks the minutes.
+// =====================================================================
+
+const MEETING_TYPES: Record<string, { label: string; agenda: { key: string; title: string; hint: string }[] }> = {
+  DAILY: {
+    label: "Daily meeting",
+    agenda: [
+      { key: "staffing", title: "Staffing & shift cover", hint: "Sickness, gaps in today's rota, cover arranged" },
+      { key: "fleet", title: "Vehicles & equipment", hint: "Vehicles off road, defects, equipment issues" },
+      { key: "incidents", title: "Incidents (last 24 hours)", hint: "New incidents, anything urgent or high severity" },
+      { key: "medication", title: "Drug bags & medication", hint: "Bags out, restocks, low stock, expiries" },
+      { key: "safety", title: "Safety alerts & anything else", hint: "Alerts to brief, other issues for today" },
+    ],
+  },
+  WEEKLY: {
+    label: "Weekly meeting",
+    agenda: [
+      { key: "actions", title: "Review of last week's actions", hint: "Progress on open actions (listed below)" },
+      { key: "incidents", title: "Incidents & investigations", hint: "New this week, open and overdue investigations, themes" },
+      { key: "regulatory", title: "Regulatory reporting (RIDDOR / CQC / duty of candour)", hint: "Notifications due or overdue" },
+      { key: "capa", title: "Corrective actions", hint: "Overdue and completed corrective actions" },
+      { key: "fleet", title: "Fleet", hint: "Vehicles off road, defects, MOT / service / insurance due" },
+      { key: "medication", title: "Medication & drug bags", hint: "Stock below minimum, expiries, waste, bag issues" },
+      { key: "staffing", title: "Staffing & training", hint: "Rota, recruitment, training and supervision" },
+      { key: "aob", title: "Any other business", hint: "" },
+    ],
+  },
+};
+
+// Live figures for the meeting, grouped by agenda item. Daily looks back 24
+// hours, weekly 7 days.
+async function buildMeetingSnapshot(type: string) {
+  const hours = type === "DAILY" ? 24 : 24 * 7;
+  const since = Date.now() - hours * 3600000;
+  const daysToRespond = await getDaysToRespond();
+  const hoursToAllocate = await getHoursToAllocate();
+  const incRows = await sql`
+    SELECT i.*, u.name AS reporter_name, m.name AS responsible_manager_name, NULL AS related_incident_ref
+    FROM incidents i LEFT JOIN users u ON u.id = i.reported_by LEFT JOIN users m ON m.id = i.responsible_manager_id
+    WHERE i.anonymised_at IS NULL
+  `;
+  const incidents = (incRows as any[]).map((r) => serializeIncident(r, daysToRespond, hoursToAllocate));
+  const open = incidents.filter((i) => i.status !== "CLOSED");
+  const brief = (i: any) => ({ ref: i.ref, category: CATEGORY_LABEL_MAP[i.category] || i.category || "Not set", severity: i.severity, status: i.status });
+  const newOnes = incidents.filter((i) => new Date(i.createdAt).getTime() >= since);
+  const candour = open.filter((i) => ["DECISION_NEEDED", "RED", "AMBER", "GREEN", "AWAITING_FINDINGS"].includes(i.compliance.candour?.state));
+  const riddor = open.filter((i) => i.compliance.riddor && i.compliance.riddor.state !== "DONE");
+  const cqc = open.filter((i) => i.compliance.cqc && i.compliance.cqc.state !== "DONE");
+
+  const overdueActions = await sql`
+    SELECT ca.description, ca.due_date, i.ref, o.name AS owner FROM corrective_actions ca
+    JOIN incidents i ON i.id = ca.incident_id LEFT JOIN users o ON o.id = ca.owner_id
+    WHERE ca.status <> 'DONE' AND ca.due_date IS NOT NULL AND ca.due_date < CURRENT_DATE ORDER BY ca.due_date LIMIT 20
+  `;
+  const [{ n: actionsDone }] = await sql`
+    SELECT COUNT(*)::int AS n FROM corrective_actions WHERE status = 'DONE' AND completed_at >= to_timestamp(${since / 1000})
+  `;
+
+  const vehicles = ((await listVehicles(false)) as any[]).map(serializeVehicle);
+  const today = new Date().toISOString().slice(0, 10);
+  const offRoad = vehicles.filter((v) => v.status !== "AVAILABLE").map((v) => ({ reg: v.reg, callSign: v.callSign, status: v.status }));
+  const notChecked = vehicles.filter((v) => v.status === "AVAILABLE" && (!v.lastCheckAt || toDateStr(v.lastCheckAt)! < today)).map((v) => v.callSign ? `${v.callSign} (${v.reg})` : v.reg);
+  const dueKeys = [["motStatus", "MOT"], ["serviceStatus", "Service"], ["insuranceStatus", "Insurance"], ["taxStatus", "Tax"]] as const;
+  const fleetDue = vehicles.flatMap((v) => dueKeys.filter(([k]) => v[k] === "OVERDUE" || v[k] === "DUE_SOON")
+    .map(([k, l]) => `${v.reg}: ${l} ${v[k] === "OVERDUE" ? "overdue" : "due within 30 days"}`));
+  const openDefects = vehicles.reduce((n, v) => n + v.openDefects, 0);
+
+  const bags = ((await listDrugBags(false)) as any[]).map(serializeDrugBag);
+  const bagsOut = bags.filter((b) => b.current).map((b) => ({
+    bagNumber: b.bagNumber, to: b.current.signedOutTo,
+    for: b.current.deployment === "EVENTS" ? `Event: ${b.current.eventName || ""}` : b.current.deployment === "FRONTLINE" ? "Frontline" : null,
+    hours: Math.floor((Date.now() - new Date(b.current.signedOutAt).getTime()) / 3600000),
+  }));
+  const bagsRestock = bags.filter((b) => !b.current && b.status === "RESTOCK").map((b) => b.bagNumber);
+  const bagsExpired = bags.filter((b) => b.expiryStatus === "OVERDUE").map((b) => b.bagNumber);
+  const items = ((await medItemRows(null, false)) as any[]).map(serializeMedItem);
+  const lowStock = items.filter((i) => i.stockStatus !== "OK").map((i) => ({ item: [i.name, i.strength].filter(Boolean).join(" "), qty: i.usableQty, min: i.minQty, unit: i.unit }));
+  const store = await medStoreSummary();
+  const [{ n: activeAlerts }] = await sql`SELECT COUNT(*)::int AS n FROM safety_alerts WHERE active = TRUE`;
+
+  return {
+    takenAt: new Date().toISOString(),
+    periodHours: hours,
+    incidents: {
+      newCount: newOnes.length,
+      newList: newOnes.slice(0, 15).map(brief),
+      open: open.length,
+      highOpen: open.filter((i) => i.severity === "HIGH" || i.severity === "CRITICAL").map(brief),
+      overdueResponse: open.filter((i) => i.responseStatus === "RED").map(brief),
+      unallocated: open.filter((i) => i.allocationStatus === "RED").map(brief),
+    },
+    regulatory: {
+      candour: candour.map((i) => ({ ref: i.ref, state: i.compliance.candour.state })),
+      riddor: riddor.map((i) => ({ ref: i.ref, state: i.compliance.riddor.state, dueAt: i.compliance.riddor.dueAt })),
+      cqc: cqc.map((i) => ({ ref: i.ref, state: i.compliance.cqc.state })),
+    },
+    capa: {
+      overdue: (overdueActions as any[]).map((a) => ({ ref: a.ref, description: a.description, owner: a.owner, dueDate: toDateStr(a.due_date) })),
+      completed: Number(actionsDone),
+    },
+    fleet: { vehicles: vehicles.length, offRoad, openDefects, notChecked, due: fleetDue },
+    medication: {
+      bagsOut, bagsRestock, bagsExpired, lowStock,
+      expiredBatches: store.expiredBatches, expiringSoonBatches: store.expiringSoonBatches,
+    },
+    safety: { activeAlerts: Number(activeAlerts) },
+  };
+}
+
+function serializeMeeting(row: any) {
+  const def = MEETING_TYPES[row.type];
+  return {
+    id: row.id,
+    type: row.type,
+    typeLabel: def?.label || row.type,
+    meetingDate: toDateStr(row.meeting_date),
+    chair: row.chair,
+    attendees: row.attendees,
+    apologies: row.apologies,
+    notes: row.notes || {},
+    agenda: def?.agenda || [],
+    snapshot: row.snapshot,
+    status: row.status,
+    createdByName: row.created_by_name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    updatedByName: row.updated_by_name,
+    finalisedByName: row.finalised_by_name,
+    finalisedAt: row.finalised_at,
+    openActions: row.open_actions !== undefined ? Number(row.open_actions) : undefined,
+    totalActions: row.total_actions !== undefined ? Number(row.total_actions) : undefined,
+  };
+}
+
+function serializeMeetingAction(row: any) {
+  return {
+    id: row.id,
+    meetingId: row.meeting_id,
+    meetingDate: toDateStr(row.meeting_date),
+    meetingType: row.meeting_type,
+    description: row.description,
+    ownerId: row.owner_id,
+    ownerName: row.owner_name,
+    dueDate: toDateStr(row.due_date),
+    status: row.status,
+    overdue: row.status !== "DONE" && !!row.due_date && dueStatus(row.due_date) === "OVERDUE",
+    createdByName: row.created_by_name,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+    completedByName: row.completed_by_name,
+    completionNote: row.completion_note,
+  };
+}
+
+async function getMeeting(id: number) {
+  const [row] = await sql`
+    SELECT mt.*, cu.name AS created_by_name, uu.name AS updated_by_name, fu.name AS finalised_by_name
+    FROM meetings mt
+    LEFT JOIN users cu ON cu.id = mt.created_by
+    LEFT JOIN users uu ON uu.id = mt.updated_by
+    LEFT JOIN users fu ON fu.id = mt.finalised_by
+    WHERE mt.id = ${id}
+  `;
+  return row || null;
+}
+
+async function meetingActionRows(where: { meetingId?: number; openOnly?: boolean; type?: string }) {
+  const meetingId = where.meetingId ?? null;
+  const openOnly = !!where.openOnly;
+  const type = where.type ?? null;
+  return await sql`
+    SELECT a.*, mt.meeting_date, mt.type AS meeting_type, o.name AS owner_name, c.name AS created_by_name, d.name AS completed_by_name
+    FROM meeting_actions a
+    JOIN meetings mt ON mt.id = a.meeting_id
+    LEFT JOIN users o ON o.id = a.owner_id
+    LEFT JOIN users c ON c.id = a.created_by
+    LEFT JOIN users d ON d.id = a.completed_by
+    WHERE (${meetingId}::int IS NULL OR a.meeting_id = ${meetingId})
+      AND (${openOnly} = FALSE OR a.status <> 'DONE')
+      AND (${type}::text IS NULL OR mt.type = ${type})
+    ORDER BY (a.status = 'DONE'), a.due_date NULLS LAST, a.created_at
+  `;
+}
+
+async function handleMeetingsRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+  if (!path.startsWith("/api/meetings")) return null;
+  const auth = await getAuth(req);
+  if (!auth) return json({ error: "Unauthorized" }, 401);
+  if (!isMgrOrAdmin(auth)) return json({ error: "Forbidden" }, 403);
+
+  if (path === "/api/meetings" && method === "GET") {
+    const type = MEETING_TYPES[String(url.searchParams.get("type") || "").toUpperCase()] ? String(url.searchParams.get("type")).toUpperCase() : null;
+    const rows = await sql`
+      SELECT mt.*, cu.name AS created_by_name, fu.name AS finalised_by_name, NULL AS updated_by_name,
+        (SELECT COUNT(*) FROM meeting_actions a WHERE a.meeting_id = mt.id AND a.status <> 'DONE') AS open_actions,
+        (SELECT COUNT(*) FROM meeting_actions a WHERE a.meeting_id = mt.id) AS total_actions
+      FROM meetings mt LEFT JOIN users cu ON cu.id = mt.created_by LEFT JOIN users fu ON fu.id = mt.finalised_by
+      WHERE (${type}::text IS NULL OR mt.type = ${type})
+      ORDER BY mt.meeting_date DESC, mt.id DESC LIMIT 200
+    `;
+    const openActions = type ? ((await meetingActionRows({ openOnly: true, type })) as any[]).map(serializeMeetingAction) : [];
+    return json({ meetings: (rows as any[]).map((r) => { const m = serializeMeeting(r); delete (m as any).snapshot; return m; }), openActions });
+  }
+
+  if (path === "/api/meetings" && method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const type = String(body.type || "").toUpperCase();
+    if (!MEETING_TYPES[type]) return json({ error: "Choose daily or weekly." }, 400);
+    const date = cleanDate(body.meetingDate) || new Date().toISOString().slice(0, 10);
+    const [existing] = await sql`SELECT id FROM meetings WHERE type = ${type} AND meeting_date = ${date}`;
+    if (existing) return json({ error: `There's already a ${MEETING_TYPES[type].label.toLowerCase()} for ${fmtDocDate(date)}.`, existingId: existing.id }, 409);
+    const snapshot = await buildMeetingSnapshot(type);
+    const [row] = await sql`
+      INSERT INTO meetings (type, meeting_date, chair, attendees, notes, snapshot, created_by, updated_by)
+      VALUES (${type}, ${date}, ${cleanText(body.chair, 120) || auth.name}, ${cleanText(body.attendees, 1000) || auth.name},
+        ${JSON.stringify({})}::text::jsonb, ${JSON.stringify(snapshot)}::text::jsonb, ${auth.sub}, ${auth.sub})
+      RETURNING id
+    `;
+    return json(serializeMeeting(await getMeeting(row.id)), 201);
+  }
+
+  // Actions (by id)
+  const am = path.match(/^\/api\/meetings\/actions\/(\d+)$/);
+  if (am) {
+    const id = Number(am[1]);
+    const [a] = await sql`SELECT a.*, mt.status AS meeting_status FROM meeting_actions a JOIN meetings mt ON mt.id = a.meeting_id WHERE a.id = ${id}`;
+    if (!a) return json({ error: "Action not found" }, 404);
+    if (method === "PUT") {
+      const body = await req.json().catch(() => ({}));
+      const status = ["OPEN", "DONE"].includes(body.status) ? body.status : a.status;
+      // Description / owner / due date can only change while the meeting is a draft;
+      // completing an action is allowed any time (it's how actions carry forward).
+      const editable = a.meeting_status !== "FINAL";
+      const description = editable && body.description !== undefined ? cleanText(body.description, 1000) || a.description : a.description;
+      const ownerId = editable && body.ownerId !== undefined ? (body.ownerId ? Number(body.ownerId) : null) : a.owner_id;
+      const dueDate = editable && body.dueDate !== undefined ? cleanDate(body.dueDate) : toDateStr(a.due_date);
+      const done = status === "DONE";
+      await sql`
+        UPDATE meeting_actions SET description = ${description}, owner_id = ${ownerId}, due_date = ${dueDate}, status = ${status},
+          completed_at = ${done ? (a.completed_at ? new Date(a.completed_at).toISOString() : new Date().toISOString()) : null},
+          completed_by = ${done ? (a.completed_by || auth.sub) : null},
+          completion_note = ${done ? (cleanText(body.completionNote, 500) ?? a.completion_note) : null}
+        WHERE id = ${id}
+      `;
+      const [row] = await meetingActionRows({ meetingId: a.meeting_id }).then((rows: any) => (rows as any[]).filter((r) => r.id === id));
+      return json(serializeMeetingAction(row));
+    }
+    if (method === "DELETE") {
+      if (a.meeting_status === "FINAL") return json({ error: "Minutes are finalised — actions can't be deleted." }, 400);
+      await sql`DELETE FROM meeting_actions WHERE id = ${id}`;
+      return new Response(null, { status: 204 });
+    }
+    return json({ error: "Not found" }, 404);
+  }
+
+  const mm = path.match(/^\/api\/meetings\/(\d+)(\/(actions|refresh|finalise))?$/);
+  if (!mm) return json({ error: "Not found" }, 404);
+  const id = Number(mm[1]);
+  const sub = mm[3] || null;
+  const meeting = await getMeeting(id);
+  if (!meeting) return json({ error: "Meeting not found" }, 404);
+  const isFinal = meeting.status === "FINAL";
+
+  if (!sub && method === "GET") {
+    const actions = ((await meetingActionRows({ meetingId: id })) as any[]).map(serializeMeetingAction);
+    // Open actions raised at earlier meetings of the same type (carried forward).
+    const carried = ((await sql`
+      SELECT a.*, mt.meeting_date, mt.type AS meeting_type, o.name AS owner_name, c.name AS created_by_name, NULL AS completed_by_name
+      FROM meeting_actions a JOIN meetings mt ON mt.id = a.meeting_id
+      LEFT JOIN users o ON o.id = a.owner_id LEFT JOIN users c ON c.id = a.created_by
+      WHERE mt.type = ${meeting.type} AND mt.id <> ${id}
+        AND (mt.meeting_date < ${toDateStr(meeting.meeting_date)} OR (mt.meeting_date = ${toDateStr(meeting.meeting_date)} AND mt.id < ${id}))
+        AND (a.status <> 'DONE' OR a.completed_at >= ${new Date(meeting.created_at).toISOString()})
+      ORDER BY a.due_date NULLS LAST, a.created_at
+    `) as any[]).map(serializeMeetingAction);
+    return json({ ...serializeMeeting(meeting), actions, carriedActions: carried });
+  }
+
+  if (!sub && method === "PUT") {
+    if (isFinal) return json({ error: "These minutes are finalised and can't be changed." }, 400);
+    const body = await req.json().catch(() => ({}));
+    const def = MEETING_TYPES[meeting.type];
+    const notes: Record<string, string> = { ...(meeting.notes || {}) };
+    if (body.notes && typeof body.notes === "object") {
+      for (const sec of def.agenda) {
+        if (body.notes[sec.key] !== undefined) notes[sec.key] = String(body.notes[sec.key] ?? "").slice(0, 8000);
+      }
+    }
+    await sql`
+      UPDATE meetings SET
+        chair = ${body.chair !== undefined ? cleanText(body.chair, 120) : meeting.chair},
+        attendees = ${body.attendees !== undefined ? cleanText(body.attendees, 1000) : meeting.attendees},
+        apologies = ${body.apologies !== undefined ? cleanText(body.apologies, 1000) : meeting.apologies},
+        notes = ${JSON.stringify(notes)}::text::jsonb,
+        updated_by = ${auth.sub}, updated_at = now()
+      WHERE id = ${id}
+    `;
+    return json(serializeMeeting(await getMeeting(id)));
+  }
+
+  if (sub === "refresh" && method === "POST") {
+    if (isFinal) return json({ error: "These minutes are finalised — figures are kept as they were." }, 400);
+    const snapshot = await buildMeetingSnapshot(meeting.type);
+    await sql`UPDATE meetings SET snapshot = ${JSON.stringify(snapshot)}::text::jsonb, updated_by = ${auth.sub}, updated_at = now() WHERE id = ${id}`;
+    return json(serializeMeeting(await getMeeting(id)));
+  }
+
+  if (sub === "actions" && method === "POST") {
+    if (isFinal) return json({ error: "These minutes are finalised — add the action to a new meeting." }, 400);
+    const body = await req.json().catch(() => ({}));
+    const description = cleanText(body.description, 1000);
+    if (!description) return json({ error: "Describe the action." }, 400);
+    const [row] = await sql`
+      INSERT INTO meeting_actions (meeting_id, description, owner_id, due_date, created_by)
+      VALUES (${id}, ${description}, ${body.ownerId ? Number(body.ownerId) : null}, ${cleanDate(body.dueDate)}, ${auth.sub})
+      RETURNING id
+    `;
+    const [full] = ((await meetingActionRows({ meetingId: id })) as any[]).filter((r) => r.id === row.id);
+    return json(serializeMeetingAction(full), 201);
+  }
+
+  if (sub === "finalise" && method === "POST") {
+    if (isFinal) return json({ error: "Already finalised." }, 400);
+    const body = await req.json().catch(() => ({}));
+    if (!cleanText(meeting.chair, 120)) return json({ error: "Enter who chaired the meeting before finalising." }, 400);
+    if (!cleanText(meeting.attendees, 1000)) return json({ error: "Enter who attended before finalising." }, 400);
+    if (body.confirm !== true) return json({ error: "Confirm the minutes are agreed." }, 400);
+    await sql`UPDATE meetings SET status = 'FINAL', finalised_by = ${auth.sub}, finalised_at = now() WHERE id = ${id}`;
+    return json(serializeMeeting(await getMeeting(id)));
+  }
+
+  if (!sub && method === "DELETE") {
+    if (isFinal) return json({ error: "Finalised minutes can't be deleted." }, 400);
+    await sql`DELETE FROM meetings WHERE id = ${id}`;
+    return new Response(null, { status: 204 });
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
 async function handleMedStoreRequest(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
   if (!path.startsWith("/api/med-store")) return null;
   const auth = await getAuth(req);
@@ -5733,6 +6127,8 @@ async function handleRequest(req: Request, ip: string): Promise<Response> {
     }
     const gdprResponse = await handleGdprRequest(req, url, path, method);
     if (gdprResponse) return gdprResponse;
+    const meetingsResponse = await handleMeetingsRequest(req, url, path, method);
+    if (meetingsResponse) return meetingsResponse;
     const publicBagResponse = await handlePublicDrugBagRequest(req, path, method, ip);
     if (publicBagResponse) return publicBagResponse;
     const medStoreResponse = await handleMedStoreRequest(req, url, path, method);

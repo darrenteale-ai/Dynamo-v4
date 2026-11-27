@@ -535,11 +535,15 @@ async function request(path, { method = 'GET', body, params } = {}) {
 
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
+    let data = null;
     try {
-      const data = await res.json();
+      data = await res.json();
       if (data?.error) message = data.error;
     } catch (_) {}
-    throw new Error(message);
+    const err = new Error(message);
+    err.data = data; // extra details from the server, e.g. existingId
+    err.status = res.status;
+    throw err;
   }
 
   if (res.status === 204) return null;
@@ -557,6 +561,16 @@ const api = {
   me: () => request('/auth/me'),
   updateMe: (data) => request('/me', { method: 'PUT', body: data }),
   listStaff: () => request('/staff'),
+  listMeetings: (type) => request('/meetings', { params: { type } }),
+  createMeeting: (data) => request('/meetings', { method: 'POST', body: data }),
+  getMeeting: (id) => request(`/meetings/${id}`),
+  updateMeeting: (id, data) => request(`/meetings/${id}`, { method: 'PUT', body: data }),
+  refreshMeeting: (id) => request(`/meetings/${id}/refresh`, { method: 'POST' }),
+  finaliseMeeting: (id) => request(`/meetings/${id}/finalise`, { method: 'POST', body: { confirm: true } }),
+  deleteMeeting: (id) => request(`/meetings/${id}`, { method: 'DELETE' }),
+  addMeetingAction: (id, data) => request(`/meetings/${id}/actions`, { method: 'POST', body: data }),
+  updateMeetingAction: (id, data) => request(`/meetings/actions/${id}`, { method: 'PUT', body: data }),
+  deleteMeetingAction: (id) => request(`/meetings/actions/${id}`, { method: 'DELETE' }),
   createStaff: (data) => request('/staff', { method: 'POST', body: data }),
   updateStaff: (id, data) => request(`/staff/${id}`, { method: 'PUT', body: data }),
   deleteStaff: (id) => request(`/staff/${id}`, { method: 'DELETE' }),
@@ -794,6 +808,10 @@ function buildNav(isAdmin) {
   safety.push({ to: '/safety-alerts', label: 'Safety Alerts', icon: '⚠️' });
   nav.push({ section: 'SAFETY & COMPLIANCE', items: safety });
   if (isAdmin) {
+    nav.push({ section: "MANAGERS' MEETINGS", items: [
+      { to: '/meetings/daily', label: 'Daily Meeting', icon: '🗓️' },
+      { to: '/meetings/weekly', label: 'Weekly Meeting', icon: '📋' },
+    ] });
     nav.push({ section: 'MEDICATION', items: [
       { to: '/medication-dashboard', label: 'Medication Dashboard', icon: '📈' },
       { to: '/medication', label: 'Drug Bag Sign In / Sign Out', icon: '💊' },
@@ -825,7 +843,9 @@ function Layout({ children }) {
   const { user, logout } = useAuth();
   const NAV = buildNav(isMgrOrAdmin(user?.role));
   const location = useLocation();
-  const pageTitle = location.pathname.startsWith('/fleet') ? 'Fleet Management'
+  const pageTitle = location.pathname.startsWith('/meetings/daily') ? 'Daily Meeting'
+    : location.pathname.startsWith('/meetings/weekly') ? 'Weekly Meeting'
+    : location.pathname.startsWith('/fleet') ? 'Fleet Management'
     : location.pathname.startsWith('/datix') ? 'Datix'
     : location.pathname.startsWith('/medication-store') ? 'Medication Store'
     : location.pathname.startsWith('/medication-dashboard') ? 'Medication Dashboard'
@@ -7697,6 +7717,394 @@ function MedicationDashboard() {
   );
 }
 
+// =====================================================================
+// Managers' meetings: daily and weekly.
+// =====================================================================
+
+const MEETING_LABEL = { daily: 'Daily Meeting', weekly: 'Weekly Meeting' };
+
+function meetingDateLabel(d) {
+  if (!d) return '';
+  return new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function MeetingsList() {
+  const { type } = useParams();
+  const navigate = useNavigate();
+  const t = type === 'weekly' ? 'WEEKLY' : 'DAILY';
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+
+  useEffect(() => {
+    setData(null);
+    setError('');
+    api.listMeetings(t).then(setData).catch((err) => setError(err.message || 'Failed to load meetings'));
+  }, [t]);
+
+  async function start() {
+    setError('');
+    setBusy(true);
+    try {
+      const m = await api.createMeeting({ type: t, meetingDate: date });
+      navigate(`/meetings/${type}/${m.id}`);
+    } catch (err) {
+      if (err.data?.existingId) { navigate(`/meetings/${type}/${err.data.existingId}`); return; }
+      setError(err.message || 'Could not start the meeting');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (error && !data) return <div className="error-banner">{error}</div>;
+  if (!data) return <div className="page-loading">Loading…</div>;
+  const today = new Date().toISOString().slice(0, 10);
+  const todays = data.meetings.find((m) => m.meetingDate === date);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>{MEETING_LABEL[type] || 'Meetings'}</h1>
+          <div className="page-sub">
+            {t === 'DAILY'
+              ? 'Short daily huddle: staffing, vehicles, last 24 hours of incidents, drug bags and safety'
+              : 'Weekly managers’ meeting: actions, incidents, regulatory, corrective actions, fleet, medication and staffing'}
+          </div>
+        </div>
+        <div className="page-header-actions" style={{ alignItems: 'center' }}>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: 160 }} />
+          {todays
+            ? <button className="btn btn-primary" onClick={() => navigate(`/meetings/${type}/${todays.id}`)}>Open {date === today ? "today's" : 'this'} meeting</button>
+            : <button className="btn btn-primary" onClick={start} disabled={busy}>{busy ? 'Starting…' : `Start ${date === today ? "today's" : 'a'} meeting`}</button>}
+        </div>
+      </div>
+      {error && <div className="error-banner" style={{ marginBottom: 12 }}>{error}</div>}
+
+      {data.openActions.length > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="kpi-panel-header">
+            <div className="kpi-panel-title">Open actions ({data.openActions.length})</div>
+            <div className="muted">From earlier {t === 'DAILY' ? 'daily' : 'weekly'} meetings</div>
+          </div>
+          <div className="kpi-list">
+            {data.openActions.map((a) => (
+              <div key={a.id} className="kpi-list-row">
+                <div>
+                  <div style={{ fontWeight: 600 }}>{a.description}</div>
+                  <div className="muted" style={{ fontSize: 12 }}>Raised {fmtDate(a.meetingDate)} · {a.ownerName || 'No owner'}</div>
+                </div>
+                <div>{a.dueDate ? <span className={'badge ' + (a.overdue ? 'badge-red' : 'badge-grey')}>Due {new Date(a.dueDate).toLocaleDateString('en-GB')}</span> : <span className="muted">No due date</span>}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="card table-card">
+        {data.meetings.length === 0 ? (
+          <div className="empty">No {t === 'DAILY' ? 'daily' : 'weekly'} meetings yet. Use “Start today's meeting” to begin.</div>
+        ) : (
+          <table className="table">
+            <thead><tr><th>Date</th><th>Chair</th><th>Attendees</th><th>Actions</th><th>Status</th></tr></thead>
+            <tbody>
+              {data.meetings.map((m) => (
+                <tr key={m.id} className="row-clickable" onClick={() => navigate(`/meetings/${type}/${m.id}`)}>
+                  <td><span className="ref-link">{meetingDateLabel(m.meetingDate)}</span></td>
+                  <td>{m.chair || '—'}</td>
+                  <td style={{ maxWidth: 360 }}>{m.attendees || '—'}</td>
+                  <td>{m.totalActions ? `${m.totalActions} (${m.openActions} open)` : '—'}</td>
+                  <td>{m.status === 'FINAL' ? <span className="badge badge-green">Finalised</span> : <span className="badge badge-amber">Draft</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Live Dynamo figures for one agenda item.
+function MeetingFigures({ k, snap }) {
+  if (!snap) return null;
+  const list = (rows, render) => rows.length ? <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{rows.map((r, i) => <li key={i}>{render(r)}</li>)}</ul> : null;
+  const inc = (r) => `${r.ref} — ${r.category}, ${r.severity}${r.status ? `, ${r.status.toLowerCase()}` : ''}`;
+  const period = snap.periodHours <= 24 ? 'last 24 hours' : 'last 7 days';
+  let body = null;
+  if (k === 'incidents') {
+    const s = snap.incidents;
+    body = (
+      <>
+        <div><strong>{s.newCount}</strong> new in the {period} · <strong>{s.open}</strong> open · <strong>{s.overdueResponse.length}</strong> overdue response · <strong>{s.unallocated.length}</strong> unallocated (overdue)</div>
+        {s.newCount > 0 && <div style={{ marginTop: 4 }}>New:{list(s.newList, inc)}</div>}
+        {s.highOpen.length > 0 && <div style={{ marginTop: 4 }}>High / critical open:{list(s.highOpen, inc)}</div>}
+        {s.overdueResponse.length > 0 && <div style={{ marginTop: 4 }}>Overdue response:{list(s.overdueResponse, inc)}</div>}
+      </>
+    );
+  } else if (k === 'regulatory' || (k === 'incidents' && false)) {
+    const r = snap.regulatory;
+    const stateText = { RED: 'overdue', AMBER: 'due soon', GREEN: 'in progress', DECISION_NEEDED: 'decision needed', AWAITING_FINDINGS: 'findings to share' };
+    body = (r.candour.length + r.riddor.length + r.cqc.length) === 0 ? <div>Nothing outstanding.</div> : (
+      <>
+        {r.candour.length > 0 && <div>Duty of candour:{list(r.candour, (x) => `${x.ref} — ${stateText[x.state] || x.state}`)}</div>}
+        {r.riddor.length > 0 && <div style={{ marginTop: 4 }}>RIDDOR:{list(r.riddor, (x) => `${x.ref} — ${stateText[x.state] || x.state}, due ${new Date(x.dueAt).toLocaleDateString('en-GB')}`)}</div>}
+        {r.cqc.length > 0 && <div style={{ marginTop: 4 }}>CQC notifications:{list(r.cqc, (x) => `${x.ref} — ${stateText[x.state] || x.state}`)}</div>}
+      </>
+    );
+  } else if (k === 'capa') {
+    const c = snap.capa;
+    body = (
+      <>
+        <div><strong>{c.overdue.length}</strong> overdue · <strong>{c.completed}</strong> completed in the {period}</div>
+        {list(c.overdue, (a) => `${a.ref}: ${a.description} — ${a.owner || 'no owner'}, due ${a.dueDate ? new Date(a.dueDate).toLocaleDateString('en-GB') : '—'}`)}
+      </>
+    );
+  } else if (k === 'fleet') {
+    const f = snap.fleet;
+    body = (
+      <>
+        <div><strong>{f.offRoad.length}</strong> of {f.vehicles} off road · <strong>{f.openDefects}</strong> open defects{snap.periodHours <= 24 ? <> · <strong>{f.notChecked.length}</strong> not checked today</> : null}</div>
+        {list(f.offRoad, (v) => `${v.callSign ? v.callSign + ' — ' : ''}${v.reg}: ${v.status.replace('_', ' ').toLowerCase()}`)}
+        {snap.periodHours <= 24 && f.notChecked.length > 0 && <div style={{ marginTop: 4 }}>No daily check yet: {f.notChecked.join(', ')}</div>}
+        {snap.periodHours > 24 && f.due.length > 0 && <div style={{ marginTop: 4 }}>Due / overdue:{list(f.due, (x) => x)}</div>}
+      </>
+    );
+  } else if (k === 'medication') {
+    const m = snap.medication;
+    body = (
+      <>
+        <div><strong>{m.bagsOut.length}</strong> bags out · <strong>{m.bagsRestock.length}</strong> to restock · <strong>{m.lowStock.length}</strong> medicines below minimum · <strong>{m.expiredBatches}</strong> expired batches</div>
+        {m.bagsOut.length > 0 && <div style={{ marginTop: 4 }}>Bags out:{list(m.bagsOut, (b) => `${b.bagNumber} — ${b.to}${b.for ? `, ${b.for}` : ''} (${b.hours}h)`)}</div>}
+        {m.bagsRestock.length > 0 && <div style={{ marginTop: 4 }}>To restock: {m.bagsRestock.join(', ')}</div>}
+        {m.bagsExpired.length > 0 && <div style={{ marginTop: 4 }}>Bags with expired items: {m.bagsExpired.join(', ')}</div>}
+        {m.lowStock.length > 0 && <div style={{ marginTop: 4 }}>Below minimum:{list(m.lowStock, (x) => `${x.item} — ${x.qty} ${x.unit} (min ${x.min})`)}</div>}
+      </>
+    );
+  } else if (k === 'safety') {
+    body = <div><strong>{snap.safety.activeAlerts}</strong> active safety alert{snap.safety.activeAlerts === 1 ? '' : 's'}</div>;
+  }
+  if (!body) return null;
+  return (
+    <div style={{ background: 'var(--bg, #f8fafc)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', fontSize: 13, marginBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>From Dynamo</div>
+      {body}
+    </div>
+  );
+}
+
+function MeetingEditor() {
+  const { type, id } = useParams();
+  const navigate = useNavigate();
+  const [m, setM] = useState(null);
+  const [staff, setStaff] = useState([]);
+  const [form, setForm] = useState(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [error, setError] = useState('');
+  const [newAction, setNewAction] = useState({ description: '', ownerId: '', dueDate: '' });
+
+  function load() {
+    return api.getMeeting(id).then((data) => {
+      setM(data);
+      setForm({ chair: data.chair || '', attendees: data.attendees || '', apologies: data.apologies || '', notes: { ...data.notes } });
+      setDirty(false);
+    }).catch((err) => setError(err.message || 'Failed to load the meeting'));
+  }
+  useEffect(() => {
+    load();
+    api.listStaff().then((rows) => setStaff(rows.filter((s) => s.active !== false))).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // Autosave notes a moment after typing stops.
+  useEffect(() => {
+    if (!dirty || !m || m.status === 'FINAL') return;
+    const t = setTimeout(() => save(), 1500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form, dirty]);
+
+  async function save() {
+    setSaving(true);
+    setError('');
+    try {
+      await api.updateMeeting(id, form);
+      setDirty(false);
+      setSavedAt(new Date());
+    } catch (err) {
+      setError(err.message || 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function setField(k, v) { setForm((f) => ({ ...f, [k]: v })); setDirty(true); }
+  function setNote(k, v) { setForm((f) => ({ ...f, notes: { ...f.notes, [k]: v } })); setDirty(true); }
+
+  async function refresh() {
+    try { await api.refreshMeeting(id); await load(); } catch (err) { setError(err.message); }
+  }
+  async function finalise() {
+    if (dirty) await save();
+    if (!confirm('Finalise these minutes? They will be locked and can no longer be edited. Open actions still carry forward.')) return;
+    try { await api.finaliseMeeting(id); await load(); } catch (err) { setError(err.message); }
+  }
+  async function remove() {
+    if (!confirm('Delete this draft meeting and its actions?')) return;
+    try { await api.deleteMeeting(id); navigate(`/meetings/${type}`); } catch (err) { setError(err.message); }
+  }
+  async function addAction(e) {
+    e.preventDefault();
+    setError('');
+    try {
+      await api.addMeetingAction(id, newAction);
+      setNewAction({ description: '', ownerId: '', dueDate: '' });
+      await load();
+    } catch (err) { setError(err.message); }
+  }
+  async function toggleAction(a) {
+    try { await api.updateMeetingAction(a.id, { status: a.status === 'DONE' ? 'OPEN' : 'DONE' }); await load(); } catch (err) { setError(err.message); }
+  }
+  async function deleteAction(a) {
+    if (!confirm('Delete this action?')) return;
+    try { await api.deleteMeetingAction(a.id); await load(); } catch (err) { setError(err.message); }
+  }
+
+  if (error && !m) return <div className="error-banner">{error}</div>;
+  if (!m || !form) return <div className="page-loading">Loading…</div>;
+  const final = m.status === 'FINAL';
+  const snap = m.snapshot;
+
+  const actionRow = (a, showMeeting) => (
+    <div key={a.id} className="kpi-list-row" style={{ alignItems: 'flex-start' }}>
+      <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontWeight: 400, flex: 1 }}>
+        <input type="checkbox" checked={a.status === 'DONE'} onChange={() => toggleAction(a)} style={{ marginTop: 3 }} />
+        <span>
+          <span style={{ textDecoration: a.status === 'DONE' ? 'line-through' : 'none' }}>{a.description}</span>
+          <div className="muted" style={{ fontSize: 12 }}>
+            {a.ownerName || 'No owner'}
+            {a.dueDate ? ` · due ${new Date(a.dueDate).toLocaleDateString('en-GB')}` : ''}
+            {showMeeting ? ` · raised ${new Date(a.meetingDate).toLocaleDateString('en-GB')}` : ''}
+            {a.status === 'DONE' && a.completedAt ? ` · done ${new Date(a.completedAt).toLocaleDateString('en-GB')}${a.completedByName ? ' by ' + a.completedByName : ''}` : ''}
+          </div>
+        </span>
+      </label>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        {a.overdue && <span className="badge badge-red">Overdue</span>}
+        {!final && !showMeeting && <button type="button" className="btn btn-ghost btn-sm" onClick={() => deleteAction(a)}>Delete</button>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <div className="muted" style={{ fontSize: 13 }}><a href={`/meetings/${type}`} onClick={(e) => { e.preventDefault(); navigate(`/meetings/${type}`); }}>← All {type} meetings</a></div>
+          <h1>{m.typeLabel} — {meetingDateLabel(m.meetingDate)}</h1>
+          <div className="page-sub">
+            {final
+              ? <>Finalised by {m.finalisedByName} on {fmtDate(m.finalisedAt)} {fmtTime(m.finalisedAt)} · read-only</>
+              : <>Draft · {saving ? 'Saving…' : dirty ? 'Unsaved changes' : savedAt ? `Saved ${fmtTime(savedAt)}` : 'Changes save automatically'}</>}
+          </div>
+        </div>
+        <div className="page-header-actions">
+          {!final && <button className="btn btn-ghost" onClick={remove}>Delete draft</button>}
+          {!final && <button className="btn btn-ghost" onClick={refresh}>Refresh figures</button>}
+          {!final && <button className="btn btn-primary" onClick={finalise}>Finalise minutes</button>}
+          {final && <span className="badge badge-green" style={{ alignSelf: 'center' }}>Finalised</span>}
+        </div>
+      </div>
+      {error && <div className="error-banner" style={{ marginBottom: 12, whiteSpace: 'pre-line' }}>{error}</div>}
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Chair</label>
+            <input value={form.chair} onChange={(e) => setField('chair', e.target.value)} disabled={final} />
+          </div>
+          <div className="form-field">
+            <label>Apologies</label>
+            <input value={form.apologies} onChange={(e) => setField('apologies', e.target.value)} disabled={final} placeholder="Who couldn't attend" />
+          </div>
+          <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+            <label>Attendees</label>
+            <input value={form.attendees} onChange={(e) => setField('attendees', e.target.value)} disabled={final} placeholder="Names, separated by commas" />
+            {!final && staff.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                {staff.filter((p) => !form.attendees.toLowerCase().split(',').map((x) => x.trim()).includes(p.name.toLowerCase())).slice(0, 12).map((p) => (
+                  <button type="button" key={p.id} className="btn btn-ghost btn-sm"
+                    onClick={() => setField('attendees', [form.attendees.trim(), p.name].filter(Boolean).join(', '))}>+ {p.name}</button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        {snap && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>Figures from Dynamo taken {fmtDate(snap.takenAt)} {fmtTime(snap.takenAt)}{!final ? ' — use “Refresh figures” to update them' : ''}.</div>}
+      </div>
+
+      {m.carriedActions.length > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="kpi-panel-header">
+            <div className="kpi-panel-title">Actions from previous meetings</div>
+            <div className="muted">Tick when done</div>
+          </div>
+          <div className="kpi-list">{m.carriedActions.map((a) => actionRow(a, true))}</div>
+        </div>
+      )}
+
+      {m.agenda.map((sec, i) => (
+        <div key={sec.key} className="card" style={{ marginBottom: 12 }}>
+          <div className="kpi-panel-header">
+            <div className="kpi-panel-title">{i + 1}. {sec.title}</div>
+          </div>
+          <MeetingFigures k={sec.key === 'safety' || sec.key === 'aob' ? sec.key : sec.key} snap={snap} />
+          {final ? (
+            <div className="policy-body" style={{ whiteSpace: 'pre-wrap' }}>{form.notes[sec.key] || <span className="muted">No notes.</span>}</div>
+          ) : (
+            <textarea value={form.notes[sec.key] || ''} onChange={(e) => setNote(sec.key, e.target.value)} rows={3}
+              placeholder={sec.hint ? `Notes — ${sec.hint.toLowerCase()}` : 'Notes'} style={{ width: '100%' }} />
+          )}
+        </div>
+      ))}
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="kpi-panel-header">
+          <div className="kpi-panel-title">Actions from this meeting</div>
+          <div className="muted">Open actions carry forward to the next {type} meeting</div>
+        </div>
+        {m.actions.length === 0 ? <div className="muted" style={{ marginBottom: 8 }}>No actions yet.</div>
+          : <div className="kpi-list" style={{ marginBottom: 10 }}>{m.actions.map((a) => actionRow(a, false))}</div>}
+        {!final && (
+          <form onSubmit={addAction} className="form-grid" style={{ alignItems: 'end' }}>
+            <div className="form-field" style={{ gridColumn: '1 / -1' }}>
+              <label>New action</label>
+              <input value={newAction.description} onChange={(e) => setNewAction({ ...newAction, description: e.target.value })} placeholder="What needs doing" required />
+            </div>
+            <div className="form-field">
+              <label>Owner</label>
+              <select value={newAction.ownerId} onChange={(e) => setNewAction({ ...newAction, ownerId: e.target.value })}>
+                <option value="">No owner</option>
+                {staff.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div className="form-field">
+              <label>Due date</label>
+              <input type="date" value={newAction.dueDate} onChange={(e) => setNewAction({ ...newAction, dueDate: e.target.value })} />
+            </div>
+            <div className="form-field">
+              <button type="submit" className="btn btn-primary">Add action</button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function FleetManagement() {
   const [tab, setTab] = useState('vehicles');
   const [summary, setSummary] = useState(null);
@@ -8432,6 +8840,8 @@ function AppRoutes() {
                 <Route path="/medication" element={<AdminRoute><Medication /></AdminRoute>} />
                 <Route path="/medication-store" element={<AdminRoute><MedicationStore /></AdminRoute>} />
                 <Route path="/medication-dashboard" element={<AdminRoute><MedicationDashboard /></AdminRoute>} />
+                <Route path="/meetings/:type" element={<AdminRoute><MeetingsList /></AdminRoute>} />
+                <Route path="/meetings/:type/:id" element={<AdminRoute><MeetingEditor /></AdminRoute>} />
                 <Route path="/staff" element={<AdminRoute><Staff /></AdminRoute>} />
                 <Route path="/case-notes" element={<AdminRoute><CaseNotes /></AdminRoute>} />
                 <Route path="/datix" element={<AdminRoute><DatixDocuments /></AdminRoute>} />
